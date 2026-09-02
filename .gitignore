@@ -1,0 +1,19 @@
+# Secrets — .env is local only. .env.example is the committed template.
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# Local model cache (the image bakes its own copy at build time)
+.models/
+
+# OS noise
+.DS_Store
+
+# Personal working notes. This repo is public; publishing them should be deliberate.
+/private-notes/

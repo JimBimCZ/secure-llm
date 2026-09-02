@@ -1,0 +1,74 @@
+{
+  "realm": "pkb",
+  "enabled": true,
+  "displayName": "Personal Knowledge Base (local mock IdP)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginTheme": "keycloak",
+  "accessTokenLifespan": 900,
+
+  "roles": {
+    "realm": [
+      { "name": "user", "description": "Can manage and query their own documents." },
+      { "name": "admin", "description": "Can additionally see service-wide operational data." }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "pkb-app",
+      "name": "Personal Knowledge Base",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "local-dev-only-change-me-client-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:3000/api/auth/callback/oidc"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles as flat roles claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Novakova",
+      "email": "alice@example.com",
+      "credentials": [{ "type": "password", "value": "alice", "temporary": false }],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Admin",
+      "lastName": "Operator",
+      "email": "admin@example.com",
+      "credentials": [{ "type": "password", "value": "admin", "temporary": false }],
+      "realmRoles": ["admin", "user"]
+    }
+  ]
+}

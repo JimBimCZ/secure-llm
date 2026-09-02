@@ -1,0 +1,106 @@
+RAM BUILD LOG - ddr5 memory, the boot loop saga
+================================================
+
+not a tidy document. dated entries, written as it happened. skip to 14/04 for the
+actual answer if you're reading this to fix something.
+
+
+02/04
+-----
+bought 2x16gb ddr5-6000 cl30, expo kit. plan is 32gb, two sticks only, leaving the
+other two slots empty on purpose. reason: on am5, populating all four dimm slots
+drops you to something like 3600-4400 mt/s stable, because the memory controller has
+to drive twice as many loads. two sticks of 32gb beats four sticks of 16gb on this
+platform basically always. worth writing down because it's counterintuitive - more
+sticks is slower.
+
+jedec base speed for ddr5 is 4800 mt/s. everything above that is an overclock, no
+matter what the box says. expo (amd) and xmp (intel) are just stored overclock
+profiles the board applies for you. they are not guaranteed. this becomes relevant
+below.
+
+
+03/04
+-----
+installed. posted first try. enabled expo in bios. did not post. no display, no
+beep, debug led sitting on the yellow DRAM light.
+
+cleared cmos, posted again at 4800. so the sticks are fine, the profile isn't
+applying cleanly.
+
+
+04/04
+-----
+tried the obvious things:
+ - reseated both sticks. slots a2/b2 as the manual says (NOT a1/b1 - the far slots
+   from the cpu are the correct pair for two-stick config, this is the opposite of
+   what feels right)
+ - updated bios. two versions behind. this alone fixed nothing but is a prerequisite
+   for everything below
+ - memory training takes 30-60s on first boot after a change on am5. i had been
+   pulling the plug at ~20s assuming it had hung. it had not hung. it was training.
+   this wasted two of the four days.
+
+lesson: after any memory change, leave it alone for a full two minutes before
+declaring it dead.
+
+
+09/04
+-----
+expo applies now after the bios update but memtest throws errors after ~40 min.
+so: posts, boots, runs, and is silently corrupting things. worse than not booting.
+
+started reading about the 1:1 ratio. on am5 the memory clock and the memory
+controller clock want to run 1:1. ddr5-6000 = 3000 mhz memclk, so uclk 3000, and
+fclk somewhere around 2000. if the board decides to run 2:1 instead, latency goes up
+badly and you lose most of what the faster kit bought you. above roughly 6400 mt/s
+most chips can't hold 1:1 any more, which is why 6000 cl30 is the sweet spot people
+keep repeating. it isn't the fastest kit, it's the fastest kit that stays in 1:1.
+
+checked mine: it was at 1:1. so that wasn't it.
+
+
+12/04
+-----
+qvl. the qualified vendor list. the board maker tests specific kits by part number
+and publishes what worked. my kit was not on it. i had assumed "ddr5-6000 cl30" was
+a specification. it is not - it's a marketing summary. the actual variable is which
+memory die is inside, and vendors change dies mid-production without changing the
+part number on the box.
+
+petra horakova (petra.horakova@example.com) has the same board and pointed this out
+in about four minutes, after i'd spent a week. her advice verbatim: "the kit part
+number is the only thing that means anything, and only against your board's qvl."
+
+
+14/04 - RESOLVED
+----------------
+raised vsoc slightly and loosened tras and trc a little from the expo values. stable
+through 12 hours of memtest and a full night of prime95 large fft.
+
+so the kit is fine, the expo profile was just marginally too tight for this
+particular board + cpu memory controller combination. that's the actual lesson:
+expo is a starting point, not a guarantee. the silicon lottery applies to the memory
+controller in your cpu just as much as to the cores.
+
+do NOT push vsoc past 1.3v on am5. this is a hard limit, not a suggestion - there
+were failures early in the platform's life traced to boards feeding excessive soc
+voltage. mine sits well under.
+
+
+SUMMARY - what i'd tell someone starting
+----------------------------------------
+1. two sticks, not four, on am5. always.
+2. slots a2/b2.
+3. buy a kit that is on your board's qvl, by exact part number.
+4. ddr5-6000 cl30 is the target unless you enjoy tuning. above that you fall out of
+   1:1 and it's a wash.
+5. after a memory change, wait two full minutes before assuming it's hung.
+6. capacity beats speed for anything real. 32gb at 5600 is a better machine than
+   16gb at 7200. the speed argument only matters once you have enough.
+7. dual channel matters more than either. one 32gb stick is meaningfully worse than
+   two 16gb sticks - roughly half the bandwidth to the memory controller.
+
+cost, for the record: 4 200 czk for the kit from marek dvorak, +420 601 234 567.
+he offered to test it in a store board before i took it, which i declined, which was
+stupid, because it would have found this in ten minutes.

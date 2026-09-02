@@ -1,0 +1,107 @@
+CASE AND AIRFLOW - notes
+========================
+
+the component people spend the least thought on and then fight for years.
+
+
+PRESSURE BALANCE
+----------------
+three states, and you get to choose:
+
+positive - intake moves more air than exhaust. surplus air leaves through every gap
+and seam in the case. dust only enters where you put a filter. this is what i run.
+
+negative - exhaust moves more than intake. the case sucks air in through every
+unfiltered gap, seam, and empty pci bracket. dust everywhere, inside everything.
+usually marginally better raw temperatures. not worth it.
+
+neutral - theoretical. does not survive contact with a dirty filter.
+
+practical implementation: intake fans slightly outnumber or out-spin exhaust fans.
+i run three front intake, one rear exhaust. the imbalance is deliberate.
+
+radek pokorny's point, which changed how i think about this: a filter you don't
+clean is worse than no filter at all. a clogged front filter starves the intake,
+which flips a positive-pressure case to negative, which pulls unfiltered dust in
+through every gap. so the filter doesn't just stop working - it inverts the whole
+strategy. clean them monthly. radek.pokorny@example.com if i need the fan model he
+recommended.
+
+
+FAN TYPES - not interchangeable
+-------------------------------
+high airflow fans: widely spaced blades, move a lot of air against little
+resistance. correct for open case positions - a rear exhaust, a top exhaust, an
+unobstructed side.
+
+high static pressure fans: closer blades, designed to push against resistance.
+correct for anything mounted to a radiator, a dense heatsink fin stack, or behind a
+restrictive front panel with a dust filter.
+
+putting an airflow fan on a radiator is the common error. the specs look better on
+paper and the actual performance is worse, because the rated airflow assumes nothing
+in the way.
+
+fan size: bigger moves the same air at lower rpm, and rpm is what you hear. a 140mm
+fan at 800rpm and a 120mm fan at 1100rpm move comparable air, and one of them is
+audible. buy the biggest the case takes.
+
+
+THE FRONT PANEL PROBLEM
+-----------------------
+a solid glass or metal front panel with a 10mm slot down each side looks good and
+strangles the intake. no fan configuration recovers from a front panel that won't
+pass air.
+
+check before buying: can air actually get in? mesh front, or large perforated
+sections. this single property affects temperatures more than the number of fan
+mounts does.
+
+learned this by owning one. swapped a case, kept every other component, gpu ran 8c
+cooler.
+
+
+CABLE MANAGEMENT IS AIRFLOW, NOT AESTHETICS
+--------------------------------------------
+a cable bundle across the front intake is a wall in front of the fans. behind the
+motherboard tray it costs nothing. this is the actual reason to route cables, and
+the aesthetic argument is secondary.
+
+velcro over zip ties - you will open this machine again.
+
+
+MEASURE BEFORE ORDERING
+-----------------------
+three numbers, every time, and i have got each of them wrong at least once:
+
+1. gpu length vs case clearance. check whether the quoted clearance assumes the
+   front fans or drive cage are removed - it usually does. mine needed the drive
+   cage out, which i discovered with the card in my hand.
+2. cpu cooler height vs side panel clearance. a tower cooler 2mm too tall means the
+   panel does not close and there is no workaround.
+3. memory heat spreader height vs cooler overhang. tall rgb memory fouls the front
+   fan of many dual-tower coolers. some coolers let you raise that fan, which then
+   reintroduces problem 2.
+
+also worth checking: psu length vs the psu shroud, especially with a fully modular
+supply where the cables need a bend radius behind it. and radiator thickness plus
+fan thickness vs top clearance, because the motherboard vrm heatsink often sits
+right where a thick top radiator wants to go.
+
+
+GPU SAG
+-------
+heavy cards bend at the pci-e slot over months. it is a slow mechanical problem, not
+a cosmetic one - the slot and the pcb both take load. a support bracket costs almost
+nothing. fit it at build time rather than after noticing the droop.
+
+
+WHAT I'D BUY AGAIN
+------------------
+mesh front, three 140mm intake, one 140mm rear exhaust, top vents left closed
+because open top vents in a positive pressure case just let the surplus out where i
+would rather it went through the gpu first. filters on all intakes. no side intake -
+it fights the front-to-back path.
+
+lucie simkova (lucie.simkova@example.com) runs the same case with a top exhaust and
+argues i'm wrong about the top vents. she may be. i have not measured it properly.
