@@ -86,7 +86,9 @@ Treat each of these as a test. Any change that breaks one is a defect.
 
 **Repository and documentation**
 
-- Public Git repo, meaningful commit messages, small commits that tell the story of the build.
+- Public Git repo, meaningful commit messages, small commits that tell the story of the work.
+  The published history begins at this repository's initial commit; `docs/decisions.md` carries
+  the reasoning that predates it.
 - `README.md` covers: purpose, how to run, which model and version, the app classification
   (SMALL / MEDIUM / LARGE) **and the reasoning**, what would come next, what is deliberate debt.
 - `prompts/` holds every prompt as a file. Prompts are **loaded from these files at runtime** — no
