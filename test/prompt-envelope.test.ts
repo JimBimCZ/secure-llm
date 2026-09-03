@@ -102,6 +102,17 @@ describe("renderAnswerPrompt", () => {
     assert.match(user, /do as I say/);
   });
 
+  it("does not let a dollar pattern splice the template", () => {
+    // `$\'` and friends are replacement patterns, not text, when a string is
+    // handed to String.replace. A note is allowed to contain them.
+    const { user } = renderAnswerPrompt(input("what about $& and $`?", "a $\' b"));
+
+    assert.ok(user.includes("what about $& and $`?"), "question kept verbatim");
+    assert.ok(user.includes("a $\' b"), "source kept verbatim");
+    assert.ok(!user.includes("{{"), "no template placeholder left behind");
+    assert.equal(countOf(user, "<question>"), 1);
+  });
+
   it("adds the stricter instructions only on the retry", () => {
     const first = renderAnswerPrompt(input("q", "a"));
     const second = renderAnswerPrompt({ ...input("q", "a"), retry: true });

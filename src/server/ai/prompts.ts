@@ -95,9 +95,13 @@ export function renderAnswerPrompt(input: AnswerInput): {
     ? `${load("answer-system")}\n\n${load("answer-retry")}`
     : load("answer-system");
 
+  // Replacer FUNCTIONS, not strings. A string replacement expands `$&`, `` $` ``
+  // and `$'` inside the replacement, so a note containing one of those could
+  // splice a copy of the template — or of everything before it — into the
+  // prompt. A function's return value is inserted verbatim.
   const user = load("answer-user")
-    .replace("{{question}}", fence(input.question))
-    .replace("{{sources}}", renderSources(input.chunks));
+    .replace("{{question}}", () => fence(input.question))
+    .replace("{{sources}}", () => renderSources(input.chunks));
 
   return { system, user };
 }
