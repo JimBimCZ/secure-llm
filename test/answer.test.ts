@@ -12,6 +12,7 @@ const chunk = (n: number, content: string): RetrievedChunk => ({
   chunkIndex: n,
   content,
   score: 0.8 - n / 100,
+  matchedBy: "vector",
 });
 
 /** Records what the model was actually sent, and replies as told. */

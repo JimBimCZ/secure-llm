@@ -29,6 +29,13 @@
       "when": 1787758997751,
       "tag": "0003_llm_calls",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788427217047,
+      "tag": "0004_chunks_fts",
+      "breakpoints": true
     }
   ]
 }

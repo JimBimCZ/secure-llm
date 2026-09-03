@@ -1,4 +1,6 @@
+import { sql, type SQL } from "drizzle-orm";
 import {
+  customType,
   index,
   integer,
   pgTable,
@@ -9,6 +11,17 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { EMBEDDING_DIMENSIONS } from "@/server/ai/types";
+
+/**
+ * Postgres' full-text type. Drizzle has no column type for it, and this is the
+ * whole of what we need: a name for the type so the generated column below can
+ * be declared and indexed.
+ */
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 /**
  * A local projection of the identity provider's subject — nothing more.
@@ -73,6 +86,15 @@ export const documents = pgTable(
  * `embeddingModel` records which model produced the vector, because vectors
  * from different models are not comparable — retrieval filters on it so
  * changing the embedder degrades to "no results", never to silent nonsense.
+ *
+ * `contentTsv` is the lexical half of retrieval (see rag/retrieve.ts). It is
+ * GENERATED, so it cannot drift from the content it indexes and there is no
+ * write path to keep in step — and because Postgres computes a stored
+ * generated column for existing rows when it is added, chunks indexed before
+ * this column existed are searchable without re-uploading anything.
+ *
+ * `'simple'`, not `'english'`: the arm exists to match identifiers literally,
+ * and stemming a part number can only lose information.
  */
 export const chunks = pgTable(
   "chunks",
@@ -88,10 +110,14 @@ export const chunks = pgTable(
     endOffset: integer("end_offset").notNull(),
     embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }).notNull(),
     embeddingModel: text("embedding_model").notNull(),
+    contentTsv: tsvector("content_tsv")
+      .notNull()
+      .generatedAlwaysAs((): SQL => sql`to_tsvector('simple', ${chunks.content})`),
   },
   (table) => [
     index("chunks_owner_idx").on(table.ownerSub),
     index("chunks_document_idx").on(table.documentId),
+    index("chunks_content_tsv_idx").using("gin", table.contentTsv),
     // Vectors are unit length, so cosine distance is the right operator and
     // agrees with the dot product both providers produce.
     index("chunks_embedding_idx").using(
