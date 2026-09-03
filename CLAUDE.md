@@ -123,6 +123,7 @@ src/
       embedders/        # local.ts | mock.ts                          (embedding)
       index.ts          # factories driven by LLM_PROVIDER / EMBEDDING_PROVIDER
     privacy/anonymizer.ts
+    privacy/detectors/   # types.ts | dictionary.ts | heuristic.ts | ner.ts   (person names)
     rag/                # chunk.ts, embed.ts, retrieve.ts, answer.ts
     db/                 # schema.ts, migrations/
     log/                # logger.ts, llmAudit.ts
@@ -217,9 +218,15 @@ The one functional promise of this app: **an answer without a source is not ship
 
 **Anonymizer** (`src/server/privacy/anonymizer.ts`), deliberately simple and explainable:
 
-- Detects e-mails and phone numbers by regex; person names from a seed dictionary plus a
-  capitalised-bigram heuristic. Its limits are documented in the README — a naive detector honestly
-  described beats a black box.
+- Detects e-mails and phone numbers by regex. **Person names come from a `PersonDetector`**
+  (`privacy/detectors/`), selected by `ANONYMIZER_PROVIDER`: `ner` (the default) runs
+  `ANONYMIZER_MODEL` in-process — no text leaves the process to be detected — and `heuristic` is
+  the model-free seed dictionary plus capitalised-bigram detector this project shipped with, kept
+  because it is what the tests use. Both keep the dictionary. Both detectors' limits are
+  documented in the README, with the measured before-and-after — a detector whose limits are
+  written down beats a black box, whichever of the two is running.
+  This is **not** a §5 seam: both implementations run in-process, and that section is about the
+  seams across which text leaves the process.
 - Replaces with stable placeholders per request: `[PERSON_1]`, `[EMAIL_1]`, `[PHONE_1]`.
 - The mapping lives **in memory for the duration of the request only** and is never persisted or
   logged.
