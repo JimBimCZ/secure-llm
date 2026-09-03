@@ -237,8 +237,10 @@ shared instance and the `Privacy` payload are unaffected.
 
 ### `src/server/env.ts`, `.env.example`, `docker-compose.yaml`, `scripts/fetch-model.mjs`, `Dockerfile`
 
-The two new variables and the rename. `fetch-model.mjs` fetches both models and verifies each
-loads, rather than only that bytes were written — the check it already makes for the embedder.
+The two new variables and the rename. The fetch script becomes `scripts/fetch-models.mjs` —
+plural, because it now bakes two — and verifies each model loads and produces what the app
+expects, rather than only that bytes were written, which is the check it already makes for the
+embedder.
 
 ### `src/instrumentation.node.ts`
 
@@ -262,11 +264,16 @@ New cases use a stub detector, so they run with no model:
 3. One instance numbers a value identically across the question and every chunk.
 4. Round trip is byte-identical.
 
-The model path itself gets **no** unit test. This suite loads no model for the same reason it
-opens no database connection: a test that does can pass for the wrong reason, and a TypeScript
-reimplementation of wordpiece stitching would test the copy rather than the model. The
-controlling verification is the measured pass in §11, recorded in the README — the same
+The **model call** gets no unit test. This suite loads no model for the same reason it opens no
+database connection: a test that does can pass for the wrong reason. The controlling
+verification for the model is the measured pass in §11, recorded in the README — the same
 admission gaps 23 and 29 already make for SQL.
+
+The code *around* the model is a different matter and is tested: `windows` and `personsIn` are
+pure functions in our own source, not reimplementations of the model's behaviour, and one of
+them is the defence against the silent truncation of §4. Testing them tests the real thing. The
+distinction worth holding is between exercising our code without the model, which is valuable,
+and reimplementing the model's job in TypeScript to assert against, which would test the copy.
 
 ## 10. New gaps this opens
 
@@ -297,8 +304,11 @@ Measured against the running stack, `docker compose up` from a fresh build, no A
 1. Startup log carries the model id and load time; no detected value appears in any log line.
 2. A question naming a person shows the redacted question in the UI with `[PERSON_1]`, and the
    answer reads with the real name restored.
-3. The full seed corpus re-measured through the running app: 6/6 distinct people, 10/10
-   occurrences, 0 false positives, e-mails 6/6 and phones 3/3 unchanged.
+3. The full seed corpus re-measured through the app's own detector, run from the builder image
+   so the real source and the baked model are both in the path: 6/6 distinct people, 10/10
+   occurrences, 0 false positives, e-mails 6/6 and phones 3/3 unchanged. The PDF is counted
+   through its source Markdown here, as in §1; step 5 covers its one person occurrence
+   (`David Kraus`) through the running app, where the real extractor is in the path.
 4. `ANONYMIZER_PROVIDER=heuristic` reproduces the old numbers, including the six false
    positives — the seam demonstrated from both sides.
 5. `ANONYMIZER_MODEL` set to a model that is not in the image: the app **fails to start**, with
