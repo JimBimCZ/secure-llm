@@ -41,6 +41,10 @@ export const WINDOW_CHARS = MODEL_WINDOW_TOKENS * CHARS_PER_TOKEN;
  * Carried across a hard split, and only a hard split. Splitting between
  * paragraphs cannot cut a name in half; cutting an over-long paragraph can,
  * and neither half would be a name the anonymizer could find.
+ *
+ * The overlap protects names up to 64 characters. The longest person name in
+ * the seed corpus is 24 characters; 64 is comfortably beyond any real name that
+ * would fit in an anonymizer output or a typical text span.
  */
 const SEAM_OVERLAP_CHARS = 64;
 
@@ -69,7 +73,7 @@ export function windows(text: string): string[] {
       continue;
     }
 
-    if (buffer.length + paragraph.length > WINDOW_CHARS) flush();
+    if (buffer.length + paragraph.length + (buffer ? 2 : 0) > WINDOW_CHARS) flush();
     buffer = buffer ? `${buffer}\n\n${paragraph}` : paragraph;
   }
 
@@ -93,7 +97,7 @@ export function personsIn(tokens: TaggedToken[], window: string): string[] {
     // A stitched form the window does not contain is a reconstruction that
     // went wrong. The anonymizer would not find it either, so dropping it here
     // keeps that fact local instead of passing a phantom name outward.
-    if (current !== null && window.includes(current)) found.push(current);
+    if (current !== null && current.trim().length > 0 && window.includes(current)) found.push(current);
     current = null;
   };
 

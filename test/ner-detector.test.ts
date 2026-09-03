@@ -54,6 +54,25 @@ describe("ner detector windowing", () => {
 
     assert.ok(windows(text).some((w) => w.includes("Lucie Šimková")));
   });
+
+  it("counts the paragraph separator in the buffer merge check", () => {
+    // Two paragraphs of 800 and 736 chars sum to 1536, but adding the "\n\n"
+    // separator (2 chars) makes 1538, exceeding WINDOW_CHARS. Without fixing
+    // the merge check to account for the separator, both paragraphs merge into
+    // a single window that exceeds the budget.
+    const a = "A".repeat(800);
+    const b = "B".repeat(736);
+    const text = `${a}\n\n${b}`;
+
+    const found = windows(text);
+
+    for (const window of found) {
+      assert.ok(
+        window.length <= WINDOW_CHARS,
+        `merged window of ${window.length} chars exceeds the ${WINDOW_CHARS} budget`,
+      );
+    }
+  });
 });
 
 describe("ner detector stitching", () => {
@@ -114,6 +133,31 @@ describe("ner detector stitching", () => {
         { entity: "B-ORG", word: "Intel" },
         { entity: "B-LOC", word: "Brno" },
         { entity: "O", word: "shipped" },
+      ],
+      window,
+    );
+
+    assert.deepEqual(found, []);
+  });
+
+  it("rejects a blank name from a lone wordpiece fragment", () => {
+    // A lone I-PER token with "##" yields an empty string when stitched.
+    // The detector must not report it.
+    const found = personsIn(
+      [
+        { entity: "I-PER", word: "##" },
+      ],
+      window,
+    );
+
+    assert.deepEqual(found, []);
+  });
+
+  it("rejects a name that is only whitespace", () => {
+    // A B-PER token with only whitespace also stitches to a blank value.
+    const found = personsIn(
+      [
+        { entity: "B-PER", word: " " },
       ],
       window,
     );
