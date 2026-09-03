@@ -145,11 +145,14 @@ stack, with the corpus already loaded.
     limit."**, the server logs `{"outcome":"daily_limit_reached"}`, and **no `llm_calls` row
     is written** — the ceiling is checked before the model is reached. Set `window_start` back
     a day and restart to watch the purge log `{"table":"user_spend","purged":1}`.
-    Then set `ASK_DAILY_CALL_LIMIT_TOTAL=1` instead, restart, ask once as `alice`
-    and once as `admin`: the second is refused with a different sentence — **"This
-    deployment has reached today's question limit."** — because a shared budget
-    spent by someone else is not the reader having asked too many questions, and
-    the app should not tell them it is.
+    Then set `ASK_DAILY_CALL_LIMIT_TOTAL=2` instead, restart, ask once as `alice`
+    and once as `admin`. The shared counter already carries the one call this
+    step made earlier, so alice's question is the deployment's second of the
+    day and still succeeds — then admin's own first question of the day is
+    refused with a different sentence — **"This deployment has reached
+    today's question limit."** — because a shared budget spent by someone
+    else is not the reader having asked too many questions, and the app
+    should not tell them it is.
 11. **The embedder swap the app tells you about.** Set `EMBEDDING_PROVIDER=mock` and restart.
     `/ask` and `/documents` now carry a notice: *"None of your documents can be searched right
     now — 53 chunks in 10 documents indexed with `Xenova/all-MiniLM-L6-v2`. Retrieval now uses
@@ -784,10 +787,14 @@ same, and **no model call happens inside it**: it holds two indexed upserts and
 nothing else. A lock held across the provider's latency is still exactly the
 thing this refuses to do.
 
-Measured on the running stack: 12 concurrent questions against a ceiling of 5 leave the
-counter at exactly 5. The retry the citation guard is allowed is a second real call, so it
-reserves again; if there is no budget for it, the question ends at the refusal the first
-attempt had already earned.
+Measured on the running stack: 12 concurrent questions, six as `alice` and six as `admin`,
+against a shared ceiling of 5 leave `deployment_spend.calls` at exactly 5 — five `200`s (three
+alice, two admin) and seven `429`s, with `user_spend` holding two rows, 3 and 2, that sum to
+the same number. Two distinct subjects took disjoint per-user row locks and then queued on the
+one shared row; the split is incidental — whichever request reached the row first — and its
+being uneven is itself the point: the shared ceiling has no notion of fair shares (gap 27). The
+retry the citation guard is allowed is a second real call, so it reserves again; if there is no
+budget for it, the question ends at the refusal the first attempt had already earned.
 
 Token totals cannot be reserved the same way — they are only known once the provider returns,
 so they are added by a separate, best-effort update after the call, against the window at that
@@ -805,7 +812,7 @@ Implemented in `src/server/retention/purge.ts`, run on startup and then hourly.
 | --- | --- | --- |
 | Documents, chunks, embeddings | Until the user deletes them | Immediate hard delete on request, cascading to chunks and embeddings |
 | LLM audit records | `RETENTION_AUDIT_DAYS`, default 30 days | Hourly purge job |
-| Per-user spend counters | The current UTC day only | Hourly purge job drops every earlier window |
+| Spend counters, per user and deployment-wide | The current UTC day only | Hourly purge job drops every earlier window |
 | Anonymization mapping | The lifetime of one request | Never persisted — there is nothing to delete |
 | Prompt content, answers, document text in logs | Never stored | n/a |
 | Application and auth logs | Not stored by this process | See the note below |
@@ -951,7 +958,7 @@ src/
       embedders/          local · mock                 (embedding)
     privacy/anonymizer.ts
     rateLimit.ts          per-user quota on the one endpoint that costs money
-    spend.ts              the daily ceiling on that same endpoint
+    spend.ts              two counted ceilings, per user and deployment-wide, reserved before each call
     rag/                  chunk · extract · ingest · retrieve · bm25 · fuse
                           · tokens · answer · citations · embeddingStatus · reembed
     retention/purge.ts
@@ -965,7 +972,7 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 102 tests, node --test, no test framework
+npm test          # 106 tests, node --test, no test framework
 npm run typecheck
 ```
 
@@ -1086,8 +1093,12 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     before it is made, by one `INSERT … ON CONFLICT … DO UPDATE SET calls =
     calls + 1 WHERE calls < $limit RETURNING calls` per counter: no returned
     row means denied, and the reservation is the check, so there is no second
-    step to race against. Measured, 12 concurrent questions against a ceiling
-    of 5 leave the counter at exactly 5; before this it overshot.
+    step to race against. Measured, 12 concurrent questions split six and six
+    between `alice` and `admin` against a shared ceiling of 5 leave the
+    counter at exactly 5. The old read-then-write shape had no such
+    guarantee — a burst reading the same count before any write landed could
+    overshoot by however many requests were in flight at once, which is the
+    exposure this replaces.
     Slice 11 had rejected exactly this, on the grounds that counting before the
     call "charges for calls that then fail". Gap 14 below complained about the
     same behaviour from the other side — that a timed-out call is *not*
@@ -1098,9 +1109,15 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     slice 11's reason unchanged, is a lock held across the model call: this
     transaction holds two indexed upserts and nothing else.
 14. **~~A model call that times out or errors is not counted against the daily
-    cap~~ — closed as a consequence of 13.** Measured with `LLM_TIMEOUT_MS=1`:
-    the call fails, `llm_calls` records it with zero tokens as before, and the
-    spend counter now reads 1 where it used to read 0.
+    cap~~ — closed as a consequence of 13.** The default `mock` provider
+    cannot demonstrate this: it runs in-process and performs no I/O, so there
+    is nothing for `AbortSignal.timeout` to abort, and `LLM_TIMEOUT_MS=1`
+    against it still returns `outcome=ok`. Measured instead against a
+    black-holed gateway (`LLM_PROVIDER=gateway`,
+    `LLM_GATEWAY_BASE_URL=http://10.255.255.1:8080`, `LLM_TIMEOUT_MS=2000`):
+    `llm_calls` records `outcome=timeout, latency_ms=2001` with zero tokens,
+    as before, and both `user_spend.calls` and `deployment_spend.calls` now
+    read 1 where they used to read 0.
 15. **Re-embedding replays stored text; it does not re-extract.** The input is
     `documents.content`, the text as the extractor read it at upload — so a document ingested
     before a change to extraction keeps whatever that extractor produced, and the PDF
@@ -1209,8 +1226,8 @@ In this order, and for these reasons:
    has to run on a complete answer, so this needs care: stream the text, hold the sources
    until the guard has passed.
 
-**This list used to hold "a shared spend ceiling" as its second item.** It is
-now built, and what it cost is worth recording: the item read "and the
+**The second item on this list, until this slice, was "a shared spend
+ceiling."** It is now built, and what it cost is worth recording: the item read "and the
 reconciliation that gaps 13 and 14 describe", treating that as work attached to
 the ceiling. It was the ceiling's precondition. Gap 13's justification —
 that the overshoot is bounded by `ASK_RATE_LIMIT_PER_MINUTE` — held only while

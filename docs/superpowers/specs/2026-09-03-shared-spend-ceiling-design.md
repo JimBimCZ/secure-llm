@@ -295,6 +295,25 @@ it is the point of the slice rather than a formality:
 
 The numbers from that pass go in the README, replacing the gap 13 and gap 14 text.
 
+### Verification, as run
+
+§8 step 5 assumed a provider timeout could simply be forced under `LLM_PROVIDER=mock`, which is
+what every other verification step in this design runs against. That assumption did not survive
+contact with the mock: it runs in-process and performs no I/O, so there is nothing for
+`AbortSignal.timeout` to abort, and `LLM_TIMEOUT_MS=1` against it still returns `outcome=ok`.
+Step 5 was run instead against a black-holed gateway (`LLM_PROVIDER=gateway`,
+`LLM_GATEWAY_BASE_URL=http://10.255.255.1:8080`, `LLM_TIMEOUT_MS=2000`), which is not a
+deviation in what the mechanism does — the reservation and the audit record do not know which
+provider is behind them — only in which provider could be used to observe it doing it.
+
+Step 2's burst was also re-run beyond what step 2 asked for. The first pass fired all twelve
+requests as one subject, which demonstrated the shared row's atomicity but not the thing a
+shared ceiling exists for: contention between different users. A second pass split the twelve
+requests six and six between `alice` and `admin`; `deployment_spend.calls` still landed at
+exactly 5, with `user_spend` split 3 and 2 across the two subjects. That second pass is the one
+quoted in the README and in `docs/decisions.md`, in preference to the single-subject one this
+design specified.
+
 ## 9. Documentation on landing
 
 - `README.md` — gaps 13 and 14 rewritten as closed, with what closing them cost; the four gaps
