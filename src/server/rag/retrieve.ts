@@ -14,7 +14,17 @@ export interface RetrievedChunk {
   filename: string;
   chunkIndex: number;
   content: string;
-  /** Cosine similarity in [0, 1]. Both embedders return unit vectors. */
+  /**
+   * Cosine similarity in [-1, 1]. Both embedders return unit vectors, so the
+   * range is the full one, not [0, 1] — a NEGATIVE value here is not a bug.
+   *
+   * A row the vector arm admitted is necessarily above RAG_MIN_SCORE. A row
+   * admitted only by a lexical arm carries its true, ungated similarity, which
+   * can sit at or below zero: for those rows the MATCH is the evidence of
+   * relevance, and the similarity is reported rather than relied on. This was
+   * always reachable through the identifier arm; the prose arm only makes it
+   * common.
+   */
   score: number;
   /** Which arms found it. Recorded for the log; nothing branches on it. */
   matchedBy: Arm[];
