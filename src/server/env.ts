@@ -35,6 +35,15 @@ const envSchema = z.object({
   // hold two. See src/server/models.ts.
   MODEL_CACHE_DIR: z.string().min(1).default("./.models"),
 
+  // --- Anonymization --------------------------------------------------
+  // The NER model that finds person names. Measured on the seed corpus at
+  // 100% person precision against the heuristic detector's 50%; the larger
+  // `bert-base-multilingual-cased-ner-hrl` was measured too and rejected.
+  ANONYMIZER_MODEL: z
+    .string()
+    .min(1)
+    .default("Xenova/distilbert-base-multilingual-cased-ner-hrl"),
+
   // --- Embeddings -----------------------------------------------------
   // `local` runs the model in this process; `mock` is a deterministic hashing
   // embedder with no model, used by tests and anywhere the model is absent.
@@ -126,6 +135,7 @@ const BUILD_PHASE_PLACEHOLDERS: Env = {
   OIDC_ROLES_CLAIM: "roles",
   OIDC_INTERNAL_ORIGIN: undefined,
   MODEL_CACHE_DIR: "./.models",
+  ANONYMIZER_MODEL: "Xenova/distilbert-base-multilingual-cased-ner-hrl",
   EMBEDDING_PROVIDER: "mock",
   EMBEDDING_MODEL: "Xenova/all-MiniLM-L6-v2",
   LLM_PROVIDER: "mock",
