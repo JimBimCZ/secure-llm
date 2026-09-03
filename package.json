@@ -11,7 +11,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "test": "node --import ./test/resolve.ts --test test/*.test.ts"
+    "test": "node --import ./test/env.ts --import ./test/resolve.ts --test test/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.120.0",
