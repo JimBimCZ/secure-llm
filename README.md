@@ -71,9 +71,9 @@ it, is worse than one that will not boot.
 
 ## What to try
 
-Eight things, each demonstrating one of the commitments above. Items 1–7 were run against a
-fresh `git clone` before this README was written; item 8 against the same stack, with the
-corpus already loaded.
+Nine things, each demonstrating one of the commitments above. Items 1–2 and 4–8 were run
+against a fresh `git clone` before this README was written; items 3 and 9 against the same
+stack, with the corpus already loaded.
 
 1. **A cited answer.** Ask *"How should I size a power supply for a high-end GPU build?"*
    Every answer carries numbered source links. Click one: it opens the source document
@@ -81,26 +81,31 @@ corpus already loaded.
 2. **The citation guarantee.** Ask *"What is the best recipe for sourdough bread starter?"*
    The corpus cannot answer it, so the app returns **"Not found in your knowledge base."**
    and never calls the model at all.
-3. **Anonymization, outbound.** Ask *"What did Marek Dvorak say about the RAM kit?"* Expand
+3. **The part-number question vector search alone gets wrong.** Ask *"What are PL1 and PL2
+   set to?"* The embedder scores the chunks that answer it at 0.054 and 0.063 — far under the
+   0.25 floor — so vector search alone returns nothing and the app would refuse. The exact
+   match on `pl1`/`pl2` finds them, and the answer comes back cited. The server logs
+   `"lexicalHits":2`. See [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers).
+4. **Anonymization, outbound.** Ask *"What did Marek Dvorak say about the RAM kit?"* Expand
    **"N values redacted before this left the app"**: it shows the question exactly as it was
    sent — `What did [PERSON_1] say about the RAM kit?`
-4. **Anonymization, inbound.** Ask *"Who should I contact about the CAKE configuration on my
+5. **Anonymization, inbound.** Ask *"Who should I contact about the CAKE configuration on my
    router?"* The panel reports that a name, an e-mail and a phone number were redacted before
    the call, and the answer above it reads *"David Kraus (david.kraus@example.com,
    +420 603 456 789) set up the CAKE configuration…"* — restored on the way back.
    (That sentence comes out of the seed PDF, whose page layout splits words across lines. It
    reads `configuration` because extraction puts them back together — see gap 5.)
-5. **Server-side authorization.** Signed in as `alice`, open
+6. **Server-side authorization.** Signed in as `alice`, open
    http://localhost:3000/api/admin/stats → **403 `{"error":"insufficient role"}`**, from the
    server, with no UI involved. Signed in as `admin` → 200. Nothing is hidden in the browser;
    the guard is the control.
-6. **Retention, enforced.** Set `RETENTION_AUDIT_DAYS=0`, restart, and watch the log line
+7. **Retention, enforced.** Set `RETENTION_AUDIT_DAYS=0`, restart, and watch the log line
    `{"table":"llm_calls","purged":N,"msg":"retention purge"}` and an empty table. Set it back
    to 30.
-7. **Delete my account.** On the home page. Wipes every document, chunk and embedding
+8. **Delete my account.** On the home page. Wipes every document, chunk and embedding
    belonging to that subject, immediately. The other user's data is untouched, and signing
    back in re-seeds a fresh corpus.
-8. **The spend ceiling.** Signed in, from the browser console:
+9. **The spend ceiling.** Signed in, from the browser console:
 
    ```js
    for (let i = 0; i < 25; i++) {
@@ -120,7 +125,7 @@ corpus already loaded.
    below the score floor, so no model call is made at all.
 
 Two of these depend on the mock answerer picking particular sentences. With a real model
-(`LLM_PROVIDER=openrouter` or `anthropic`) the answers are better written — item 4 comes back
+(`LLM_PROVIDER=openrouter` or `anthropic`) the answers are better written — item 5 comes back
 as *"You should contact David Kraus for the CAKE configuration on your router…"* rather than a
 lifted sentence — but the citations, the refusal and the redaction behave identically. Those
 are enforced by the app, not by the model.
@@ -133,8 +138,11 @@ are enforced by the app, not by the model.
 question
    │
    ├─ 1. embed the question in-process ─────────────► no network
-   ├─ 2. vector search: owner + embedding model + score floor, all in ONE SQL predicate
-   │       └─ nothing clears the floor? → "Not found in your knowledge base." (no model call)
+   ├─ 2. TWO SEARCHES, each filtering owner + embedding model in ONE SQL predicate
+   │       ├─ vector: everything over the score floor
+   │       ├─ lexical: only if the question holds a part number, and only exact matches
+   │       ├─ fuse the two rankings (reciprocal rank fusion)
+   │       └─ both empty? → "Not found in your knowledge base." (no model call)
    ├─ 3. anonymize the question and every retrieved chunk ──► [PERSON_1], [EMAIL_1], [PHONE_1]
    ├─ 4. wrap each source in a <source> envelope it cannot write its way out of
    ├─ 5. one model call, through one wrapper that times out and writes the audit record
@@ -209,6 +217,51 @@ very hard to spot. At the original ~800-token target, 32 of 40 chunks overran it
 third of every document was invisible. After resizing to ~500 tokens (budgeted
 pessimistically at 3 characters per token), 0 of 53 chunks truncate and top similarity rose
 from 0.44 to 0.51.
+
+---
+
+### Retrieval: two arms, because embeddings cannot see part numbers
+
+A sentence model is good at meaning and bad at identifiers. `all-MiniLM-L6-v2` puts
+`ddr5-6000` and `ddr5-5600` in nearly the same place — to the model they are the same kind of
+thing said about the same subject — which is exactly wrong when the question is which of the
+two to buy. Measured against the seed corpus, asking *"what are PL1 and PL2 set to?"* returned
+**nothing at all**: the answer is in `01-cpu-notes.md`, but its chunks score 0.054 and 0.063,
+far below the 0.25 floor. The app said "Not found in your knowledge base." about a document it
+had indexed.
+
+So retrieval has a second arm. It runs **only** when the question contains something shaped
+like a part number — at least three characters, mixing letters and digits — and it demands
+that every such token is present in the chunk (`plainto_tsquery` ANDs its terms). The two
+rankings are combined with reciprocal rank fusion, because a cosine similarity and a text rank
+are not on a scale that can be compared, while their ranks are.
+
+Measured on the same corpus, after:
+
+| Question | Vector arm | What the lexical arm added |
+| --- | --- | --- |
+| *what are PL1 and PL2 set to?* | 0 hits — a false refusal | The 2 chunks that answer it, at 0.054 and 0.063 |
+| *is ddr5-6000 cl30 worth it over a slower kit?* | 6 hits, the two most specific ranked out | 2 chunks naming the exact kit, at 0.355 and 0.329 |
+| *does my monitor need UHBR20?* | 6 hits, already correct | Nothing — identical result |
+| *how should I size a power supply…* | 6 hits | Arm never runs: no part number in the question |
+| *best recipe for sourdough starter?* | 0 hits | Arm never runs → still "Not found", still no model call |
+
+That narrowness is deliberate, and it is what keeps the one functional promise intact. "Not
+found in your knowledge base." is produced by retrieval returning nothing, before any model
+call. A broad keyword arm would answer nearly every question with *something*, and the refusal
+would come to rest on a similarity threshold invented for text ranks and tuned by feel. There
+is no such threshold here and no new environment variable: a chunk either contains the
+identifier or it does not. When the question holds no identifier — the common case — the arm
+does not run and retrieval is byte-identical to what it was before.
+
+The trade is that a chunk can now reach the model on an exact match alone, at a cosine the
+vector arm would have rejected. That is the intended behaviour — the match is the evidence —
+and the citation guard is still the backstop underneath it.
+
+The `content_tsv` column is `GENERATED ALWAYS … STORED`, so it cannot drift from the content it
+indexes and there is no write path to keep in step. Postgres computes it for existing rows when
+the column is added, so all 53 already-indexed chunks became searchable on the migration, with
+nothing re-uploaded.
 
 ---
 
@@ -619,7 +672,8 @@ src/
       embedders/          local · mock                 (embedding)
     privacy/anonymizer.ts
     rateLimit.ts          per-user quota on the one endpoint that costs money
-    rag/                  chunk · extract · ingest · retrieve · answer · citations
+    rag/                  chunk · extract · ingest · retrieve · fuse · tokens
+                          · answer · citations
     retention/purge.ts
     db/                   schema + migrations, applied on startup
     log/                  logger.ts, llmAudit.ts
@@ -631,7 +685,7 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 61 tests, node --test, no test framework
+npm test          # 77 tests, node --test, no test framework
 npm run typecheck
 ```
 
@@ -647,6 +701,8 @@ money incident rather than a visible bug:
 | PDF extraction | Against the seed PDF itself, the file whose layout produced the defect |
 | The `gateway` provider | Against a stub gateway: the route, the bearer credential, the request, the parsing |
 | `consumeAskQuota` | The ceiling on what one session can spend |
+| `distinctiveTokens` | It decides whether the lexical arm runs at all — return the wrong thing and the refusal path changes |
+| `fuseByRank` | That fusion only ORDERS: an empty result stays empty, and a lexical-only chunk is never dropped |
 
 Two seams make this possible without a database, a key or a model. `askQuestion` takes its
 retrieval and its model call as a defaulted parameter, so a stub can produce the one thing no
@@ -721,6 +777,20 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
    display and the admin count. Authorization never reads it, so a stale value is cosmetic —
    but anyone reading the schema should know it is there and why it is not authoritative.
 10. **The Keycloak realm uses `start-dev`.** Correct for a mock IdP, wrong for anything else.
+11. **The lexical arm cannot see a part number written as two tokens.** It requires a token
+    that mixes letters and digits, so `ddr5-6000`, `B650E` and `PL2` are found and `RTX 4090`
+    — brand and number separated by a space — is not: `RTX` has no digit and `4090` no letter.
+    Admitting bare numbers was the alternative and it is worse, because a bare number is far
+    more often a year, a price or a quantity than an identifier, and every question mentioning
+    one would start dragging chunks past the score floor. Pairing a capitalised word with a
+    following number would catch this case and is the obvious next refinement; it is not here
+    because nothing in the seed corpus is written that way, and a heuristic with no example to
+    test against is a guess.
+12. **The lexical arm does no stemming and no synonyms.** It uses the `simple` dictionary, so
+    it matches identifiers exactly and matches nothing else — `NVMe` will not find `NVM`, and a
+    typo finds nothing. That is the intended trade for a part-number arm, but it means the arm
+    contributes nothing at all to ordinary prose questions, which remain entirely the vector
+    arm's job.
 
 ## What I would build next
 
@@ -728,9 +798,11 @@ In this order, and for these reasons:
 
 1. **Run the `anthropic` path end to end and re-measure.** Gap 1 above. Everything else is
    downstream of knowing the real path works.
-2. **A better retriever.** Vector search alone misses exact-token queries — part numbers,
-   error codes, `ddr5-6000`. Hybrid search (BM25 alongside vectors, fused) would fix a class
-   of miss the current design cannot, and the seed corpus already shows it.
+2. **Finish the retriever.** The lexical arm now catches part numbers written as one token
+   (see [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers)); gaps 11
+   and 12 are what it still cannot do. The next honest step is a real BM25 arm for prose
+   questions — which needs the score floor rethought, because that is the thing currently
+   holding the refusal path up.
 3. **A per-user spend cap**, using the audit table that already exists. The per-minute rate
    limit bounds the pace of spending, not its total.
 4. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
