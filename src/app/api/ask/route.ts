@@ -4,9 +4,35 @@ import { authErrorResponse, requireUser } from "@/server/auth/guard";
 import { logger } from "@/server/log/logger";
 import { askQuestion } from "@/server/rag/answer";
 import { consumeAskQuota } from "@/server/rateLimit";
-import { checkDailySpend } from "@/server/spend";
+import { checkDailySpend, type SpendScope } from "@/server/spend";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * The two ceilings, in words the person being refused can act on.
+ *
+ * Naming the shared one matters: telling someone who has asked two questions
+ * that they have asked too many is the application stating something false
+ * about the reader in order to reveal nothing about anybody else. This reveals
+ * only that a shared budget exists and is spent — no user, no count, no times.
+ */
+const LIMIT_MESSAGE: Record<SpendScope, string> = {
+  user: "You have reached today's question limit.",
+  deployment: "This deployment has reached today's question limit.",
+};
+
+function limitReached(refusal: {
+  scope: SpendScope;
+  retryAfterSeconds: number;
+}): Response {
+  return Response.json(
+    { error: LIMIT_MESSAGE[refusal.scope] },
+    {
+      status: 429,
+      headers: { "retry-after": String(refusal.retryAfterSeconds) },
+    },
+  );
+}
 
 /** Long enough for a real question, short enough to bound the prompt. */
 const askSchema = z.object({
@@ -37,18 +63,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // The pace is bounded above; this bounds the total. One indexed lookup,
-    // still before the body is read, for the same reason.
+    // The pace is bounded above; this bounds the total. One indexed read,
+    // still before the body is read, so a question the ceilings will refuse
+    // costs as little as possible. It is an early exit and NOT the control —
+    // `reserveCall` in the ask flow is, and it runs again below.
     const budget = await checkDailySpend(sub);
     if (!budget.allowed) {
-      logger.warn({ sub, outcome: "daily_limit_reached" }, "ask");
-      return Response.json(
-        { error: "You have reached today's question limit." },
-        {
-          status: 429,
-          headers: { "retry-after": String(budget.retryAfterSeconds) },
-        },
+      logger.warn(
+        { sub, scope: budget.scope, outcome: "daily_limit_reached" },
+        "ask",
       );
+      return limitReached(budget);
     }
 
     const parsed = askSchema.safeParse(await request.json().catch(() => null));
@@ -60,6 +85,12 @@ export async function POST(request: Request) {
     }
 
     const result = await askQuestion(sub, parsed.data.question);
+
+    // The reservation refused what the pre-check let through: the counter
+    // filled in between, which is the race the reservation exists to lose
+    // safely.
+    if (result.status === "budget_exhausted") return limitReached(result);
+
     return Response.json(result);
   } catch (error) {
     const response = authErrorResponse(error);
