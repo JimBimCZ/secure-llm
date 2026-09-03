@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/server/auth/config";
 import { env } from "@/server/env";
 
+import { EmbeddingNotice } from "../embedding-notice";
 import { AskForm } from "./ask-form";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +21,10 @@ export default async function AskPage() {
         passage it came from. If nothing in your notes covers the question, the
         app says so rather than guessing.
       </p>
+
+      {/* On this page especially: an unexplained refusal is indistinguishable
+          from a corpus that does not cover the question. */}
+      <EmbeddingNotice ownerSub={session.sub} />
 
       <AskForm />
 
