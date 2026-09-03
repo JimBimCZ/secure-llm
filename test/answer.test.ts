@@ -33,6 +33,7 @@ const deps = (
   model: { answer: AskDependencies["answer"] },
 ): AskDependencies => ({
   retrieve: async () => chunks,
+  recordSpend: async () => {},
   answer: model.answer,
 });
 

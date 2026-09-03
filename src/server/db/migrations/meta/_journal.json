@@ -36,6 +36,13 @@
       "when": 1788427217047,
       "tag": "0004_chunks_fts",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788429933191,
+      "tag": "0005_user_spend",
+      "breakpoints": true
     }
   ]
 }

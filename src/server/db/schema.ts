@@ -4,6 +4,7 @@ import {
   index,
   integer,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uuid,
@@ -165,3 +166,38 @@ export const llmCalls = pgTable(
 );
 
 export type LlmCall = typeof llmCalls.$inferSelect;
+
+/**
+ * How much one user has spent in the window in force. A counter, not a log.
+ *
+ * This is the table `llm_calls` deliberately refused to become, built so that
+ * it cannot become it. The difference is not a policy, it is the shape:
+ *
+ * - ONE row per user per window, updated in place. There is no per-call row,
+ *   so there is no ordering and no per-question timestamp — nothing here can be
+ *   read back as "what did this person ask, and when".
+ * - The only fields are totals. As with `llm_calls`, the type is the control:
+ *   there is nowhere to put a prompt, an answer or a document.
+ * - The retention job deletes every row that is not the current window, so
+ *   within the hour this holds at most one row per user, for today.
+ *
+ * The cost is stated plainly in the README: the database now records that a
+ * given user made N calls today. That is the minimum a ceiling can know, and
+ * `deleteAccount` removes it with everything else belonging to the subject.
+ */
+export const userSpend = pgTable(
+  "user_spend",
+  {
+    sub: text("sub").notNull(),
+    /** Start of the UTC day. See server/spend.ts for why UTC. */
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    calls: integer("calls").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+  },
+  // The composite key is what makes the upsert an increment rather than a new
+  // row, and what stops the same user holding two counters for one window.
+  (table) => [primaryKey({ columns: [table.sub, table.windowStart] })],
+);
+
+export type UserSpend = typeof userSpend.$inferSelect;

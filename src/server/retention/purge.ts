@@ -1,9 +1,10 @@
-import { eq, lt } from "drizzle-orm";
+import { eq, lt, ne } from "drizzle-orm";
 
 import { db } from "@/server/db";
-import { documents, llmCalls, users } from "@/server/db/schema";
+import { documents, llmCalls, users, userSpend } from "@/server/db/schema";
 import { env } from "@/server/env";
 import { logger } from "@/server/log/logger";
+import { currentWindowStart } from "@/server/spend";
 
 /**
  * Retention, enforced rather than described (CLAUDE.md §7).
@@ -53,6 +54,24 @@ export async function purgeExpiredRecords(): Promise<void> {
     // take the application down.
     logger.error({ err: error }, "retention purge failed");
   }
+
+  // Spend counters keep NOTHING beyond the window they are enforcing. Every row
+  // that is not the current window has already done its only job, so it goes —
+  // which is what keeps `user_spend` a counter for today rather than a record
+  // of how much each person used the app, day by day, going back a month.
+  try {
+    const deleted = await db
+      .delete(userSpend)
+      .where(ne(userSpend.windowStart, currentWindowStart()))
+      .returning({ sub: userSpend.sub });
+
+    logger.info(
+      { table: "user_spend", purged: deleted.length, keeping: "current window" },
+      "retention purge",
+    );
+  } catch (error) {
+    logger.error({ err: error }, "spend counter purge failed");
+  }
 }
 
 /**
@@ -77,14 +96,16 @@ export function startRetentionSchedule(): void {
  * Everything this app holds about one identity, removed.
  *
  * "Delete my account" in §7. Documents cascade to their chunks and embeddings
- * through the foreign key, so this is two statements rather than a careful
+ * through the foreign key, so this is three statements rather than a careful
  * ordering someone could get wrong later. The `llm_calls` table is deliberately
  * untouched because it holds no subject — there is nothing in it belonging to
- * this person to delete.
+ * this person to delete. `user_spend` DOES hold one, so it is deleted here:
+ * a table keyed by the subject is a table "delete my account" has to reach.
  */
 export async function deleteAccount(ownerSub: string): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.delete(documents).where(eq(documents.ownerSub, ownerSub));
+    await tx.delete(userSpend).where(eq(userSpend.sub, ownerSub));
     await tx.delete(users).where(eq(users.sub, ownerSub));
   });
 

@@ -4,6 +4,7 @@ import { authErrorResponse, requireUser } from "@/server/auth/guard";
 import { logger } from "@/server/log/logger";
 import { askQuestion } from "@/server/rag/answer";
 import { consumeAskQuota } from "@/server/rateLimit";
+import { checkDailySpend } from "@/server/spend";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,20 @@ export async function POST(request: Request) {
         {
           status: 429,
           headers: { "retry-after": String(quota.retryAfterSeconds) },
+        },
+      );
+    }
+
+    // The pace is bounded above; this bounds the total. One indexed lookup,
+    // still before the body is read, for the same reason.
+    const budget = await checkDailySpend(sub);
+    if (!budget.allowed) {
+      logger.warn({ sub, outcome: "daily_limit_reached" }, "ask");
+      return Response.json(
+        { error: "You have reached today's question limit." },
+        {
+          status: 429,
+          headers: { "retry-after": String(budget.retryAfterSeconds) },
         },
       );
     }
