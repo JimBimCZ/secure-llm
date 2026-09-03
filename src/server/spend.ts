@@ -300,8 +300,14 @@ export async function reserveCall(
  *
  * Separate from the reservation because tokens are only known once the
  * provider has answered, and the call itself was charged before it was made.
- * Both rows already exist — `reserveCall` created them — so this is an update,
- * and an update matching nothing is a no-op rather than an error.
+ * Both rows normally already exist — `reserveCall` created them — so this is
+ * an update, and an update matching nothing is a no-op rather than an error.
+ * The exception is a call that straddles UTC midnight: this recomputes the
+ * window from answer time, so a call reserved at 23:59:58 and answered four
+ * seconds later updates the NEXT day's rows, matches nothing, and loses its
+ * token totals. The CEILING is unaffected, because the ceiling counts calls
+ * and the call was already charged; only the token totals go missing, which
+ * is the direction this function is already willing to be wrong in.
  *
  * Like the audit record, a failure to count must never fail the user's
  * question: the answer is already computed and correct. Losing token totals
