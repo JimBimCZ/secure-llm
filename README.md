@@ -420,16 +420,17 @@ stack:
 | *is undervolting worth doing?* | 0 rows — refused | 2 rows, `01-cpu-notes.md`#5 and `02-gpu-notes.md`#4 — both documents that discuss it |
 | *what contradiction did I never get to the bottom of?* | 0 rows — refused | **still 0 rows** — coverage 0.34, below the bar. Gap 19 |
 
-**And what it cost.** The prose arm runs on **every** question, like the identifier arm and
-unlike a rescue that fires only when the vector arm came back empty — gating one arm on another's
-outcome would make retrieval depend on the order the arms are evaluated in. Running on every
-question means it can make things worse, so the ten prose questions that already worked were
-measured before and after. The expected document is present in the top 6 for all ten. In three
-(*chipset*, *PSU age*, *power draw*) it is represented by **more** chunks than before. Two of
-those three evicted a document from the top 6 — in both cases a single-chunk, off-topic
-incidental hit, displaced by additional on-topic prose hits from the document the question is
-actually about. Three (*thermal paste*, *cheap board*, *fan count*) returned the same rows in a
-different order. No question lost its expected document.
+**And what it cost.** The prose arm runs on **every** question, like the vector arm — the
+identifier arm is the one that's conditional, and only on the question itself, never on another
+arm's outcome. It is not a rescue that fires only when the vector arm came back empty: gating one
+arm on another's outcome would make retrieval depend on the order the arms are evaluated in.
+Running on every question means it can make things worse, so the ten prose questions that already
+worked were measured before and after. The expected document is present in the top 6 for all ten.
+In three (*chipset*, *PSU age*, *power draw*) it is represented by **more** chunks than before.
+Two of those three evicted a document from the top 6 — in both cases a single-chunk, off-topic
+incidental hit, displaced by additional same-topic prose hits. Three (*thermal paste*, *cheap
+board*, *fan count*) returned the same rows in a different order. No question lost its expected
+document.
 
 End to end through the running app: the six unanswerable questions all rendered "Not found in
 your knowledge base." and `llm_calls` stayed at 7 — none of them reached the model. Asking *"what
@@ -1068,8 +1069,10 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     way to re-embed on behalf of everyone. For a single-user knowledge base that is the whole
     population, and for anything larger it is the first thing to add.
 18. **The prose arm's 0.5 coverage constant is arbitrary in the way any threshold is.** It is
-    derived from a measured separation on one corpus of 53 chunks — answerable questions at
-    0.63 and above, unanswerable ones at 0.23 and below — and not from theory. `k1 = 1.2` and
+    derived from a measured separation on one corpus of 53 chunks, over full-sentence questions
+    only — answerable ones at 0.63 and above, unanswerable ones at 0.23 and below — and not from
+    theory. Coverage alone fails on short questions, which is why the two-term minimum below
+    (gap 20) exists. `k1 = 1.2` and
     `b = 0.75` are adopted from the BM25 literature and are defensible on that basis; 0.5 and
     the two-term minimum are ours, and this line is the whole of their defence. The constants
     are deliberately not environment variables: the refusal path should not be tunable until a

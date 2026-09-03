@@ -79,10 +79,12 @@ type ScoredChunk = Omit<RetrievedChunk, "matchedBy">;
  * by IDF-mass coverage rather than by a score floor; rag/bm25.ts is where that
  * choice is argued.
  *
- * It runs on EVERY question, like the other two and unlike a rescue that fires
- * only when the vector arm came back empty. Gating one arm on another's outcome
- * would make retrieval depend on the order the arms are evaluated in, and would
- * cost fusion its claim that every list it receives was filtered independently.
+ * It runs on EVERY question, like the vector arm and unlike the identifier arm,
+ * which is conditional on the question — never on another arm's outcome. It is
+ * not a rescue that fires only when the vector arm came back empty: gating one
+ * arm on another's outcome would make retrieval depend on the order the arms
+ * are evaluated in, and would cost fusion its claim that every list it receives
+ * was filtered independently.
  */
 export async function retrieveChunks(
   ownerSub: string,
