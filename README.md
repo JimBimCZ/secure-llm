@@ -71,8 +71,8 @@ it, is worse than one that will not boot.
 
 ## What to try
 
-Nine things, each demonstrating one of the commitments above. Items 1–2 and 4–8 were run
-against a fresh `git clone` before this README was written; items 3 and 9 against the same
+Ten things, each demonstrating one of the commitments above. Items 1–2 and 4–8 were run
+against a fresh `git clone` before this README was written; items 3, 9 and 10 against the same
 stack, with the corpus already loaded.
 
 1. **A cited answer.** Ask *"How should I size a power supply for a high-end GPU build?"*
@@ -123,6 +123,17 @@ stack, with the corpus already loaded.
    `{"outcome":"rate_limited"}`. Asking something the corpus cannot answer keeps the whole
    loop free: the quota is consumed before the request body is read, and retrieval refuses
    below the score floor, so no model call is made at all.
+10. **The daily ceiling.** Ask one question, then look at the counter:
+
+    ```bash
+    docker compose exec db psql -U pkb -d pkb -c "SELECT * FROM user_spend;"
+    ```
+
+    One row for your subject, `calls=1`, with the token totals. Set `calls` to
+    `ASK_DAILY_CALL_LIMIT` and ask again: the UI says **"You have reached today's question
+    limit."**, the server logs `{"outcome":"daily_limit_reached"}`, and **no `llm_calls` row
+    is written** — the ceiling is checked before the model is reached. Set `window_start` back
+    a day and restart to watch the purge log `{"table":"user_spend","purged":1}`.
 
 Two of these depend on the mock answerer picking particular sentences. With a real model
 (`LLM_PROVIDER=openrouter` or `anthropic`) the answers are better written — item 5 comes back
@@ -525,6 +536,41 @@ needing a different justification. Failed calls are recorded too, with zero toke
 Errors are audited by the error's **class name**, never its message: a provider error can echo
 the request back, and the request contains the user's own notes.
 
+### The daily spend cap, and the one thing it does record
+
+`ASK_RATE_LIMIT_PER_MINUTE` bounds the **pace** of spending. It does nothing about a user
+asking nineteen questions a minute all day, which is the same bill arriving more slowly. So
+there is a second ceiling, `ASK_DAILY_CALL_LIMIT`, on the **total**.
+
+A ceiling has to know how much someone has already spent, and the audit table above refuses —
+correctly — to know who spent it. Rather than reverse that decision, the counter is a separate
+table shaped so it cannot become the thing `llm_calls` declined to be:
+
+| | `llm_calls` | `user_spend` |
+| --- | --- | --- |
+| Rows | One **per call** | One **per user per day**, updated in place |
+| Subject | None | The subject — that is the point |
+| Timestamps | Per call | The window only; no per-question time |
+| Retention | 30 days | The current day; every earlier window is purged hourly |
+
+One row per user per day, incremented in Postgres by an upsert, with no per-call row, no
+ordering and no per-question timestamp. Nothing in it can be read back as *"what did this
+person ask, and when"* — the most it can say is *"this subject made N calls today"*. That is
+the minimum a ceiling can know, and it is stated here rather than buried: **the database now
+records that a given user made N calls today**, where before it recorded nothing about who.
+`Delete my account` removes those rows in the same transaction as the documents.
+
+The cap counts **calls**, not tokens, because the size of one call is already bounded —
+`RAG_TOP_K` chunks in, a capped answer out — so a ceiling on calls is a ceiling on money, and
+"200 questions today" is a number a user who hits it can act on in a way that "140,000 tokens"
+is not. Tokens are summed into the counter anyway, so the truer figure is there when a token
+cap is wanted.
+
+The check runs in the route before the request body is read, and the increment runs after the
+model actually answers — so the "Not found in your knowledge base." path, which never reaches
+a model, never costs anyone a call. The retry counts separately, because it is a second real
+call.
+
 ### Retention
 
 Implemented in `src/server/retention/purge.ts`, run on startup and then hourly.
@@ -533,6 +579,7 @@ Implemented in `src/server/retention/purge.ts`, run on startup and then hourly.
 | --- | --- | --- |
 | Documents, chunks, embeddings | Until the user deletes them | Immediate hard delete on request, cascading to chunks and embeddings |
 | LLM audit records | `RETENTION_AUDIT_DAYS`, default 30 days | Hourly purge job |
+| Per-user spend counters | The current UTC day only | Hourly purge job drops every earlier window |
 | Anonymization mapping | The lifetime of one request | Never persisted — there is nothing to delete |
 | Prompt content, answers, document text in logs | Never stored | n/a |
 | Application and auth logs | Not stored by this process | See the note below |
@@ -645,6 +692,7 @@ back to its default rather than failing validation on an empty string.
 | `RAG_TOP_K` | `6` | Chunks put in front of the model |
 | `RAG_MIN_SCORE` | `0.25` | Similarity floor; below it, "Not found in your knowledge base." |
 | `ASK_RATE_LIMIT_PER_MINUTE` | `20` | Questions one signed-in user may ask per minute. `0` disables it. Counted in-process, so it is per instance |
+| `ASK_DAILY_CALL_LIMIT` | `200` | Model calls one user may make per UTC day. `0` disables it. Counted in the database, so it survives a restart |
 | `RETENTION_AUDIT_DAYS` | `30` | Audit record lifetime. `0` purges everything on next run |
 
 `RAG_MIN_SCORE` is measured, not guessed: answerable questions against the seed corpus score
@@ -672,6 +720,7 @@ src/
       embedders/          local · mock                 (embedding)
     privacy/anonymizer.ts
     rateLimit.ts          per-user quota on the one endpoint that costs money
+    spend.ts              the daily ceiling on that same endpoint
     rag/                  chunk · extract · ingest · retrieve · fuse · tokens
                           · answer · citations
     retention/purge.ts
@@ -685,7 +734,7 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 77 tests, node --test, no test framework
+npm test          # 86 tests, node --test, no test framework
 npm run typecheck
 ```
 
@@ -701,6 +750,7 @@ money incident rather than a visible bug:
 | PDF extraction | Against the seed PDF itself, the file whose layout produced the defect |
 | The `gateway` provider | Against a stub gateway: the route, the bearer credential, the request, the parsing |
 | `consumeAskQuota` | The ceiling on what one session can spend |
+| `spendDecision` | The daily ceiling's boundary: the call that is allowed and the one that is not |
 | `distinctiveTokens` | It decides whether the lexical arm runs at all — return the wrong thing and the refusal path changes |
 | `fuseByRank` | That fusion only ORDERS: an empty result stays empty, and a lexical-only chunk is never dropped |
 
@@ -772,7 +822,8 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
    replicas therefore mean twice the limit, and a restart forgives everyone — the safe
    direction to be wrong in for a spend ceiling, but a real limitation. The control belongs at
    the gateway that already sees every call and holds the budget; this is the honest in-app
-   approximation of it, not a replacement.
+   approximation of it, not a replacement. `ASK_DAILY_CALL_LIMIT` is counted in the database
+   instead, so it survives both a restart and a second replica — but see gaps 13 and 14.
 9. **`users.role_snapshot` can go stale.** It is refreshed at sign-in and used only for
    display and the admin count. Authorization never reads it, so a stale value is cosmetic —
    but anyone reading the schema should know it is there and why it is not authoritative.
@@ -791,6 +842,19 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     typo finds nothing. That is the intended trade for a part-number arm, but it means the arm
     contributes nothing at all to ordinary prose questions, which remain entirely the vector
     arm's job.
+13. **The daily cap is checked and incremented separately, so a burst can overshoot it.** The
+    count is read when the request arrives and written after the model answers; requests in
+    flight at the same moment all read the same number. The overshoot is bounded by how many
+    can be in flight, which `ASK_RATE_LIMIT_PER_MINUTE` already bounds, and a ceiling that is
+    occasionally a call or two generous is a much smaller problem than one taking a lock on
+    every question. A single `INSERT … RETURNING` doing both at once would close it, at the
+    cost of counting calls that then fail.
+14. **A model call that times out or errors is not counted against the daily cap.** It is
+    counted in `llm_calls`, with zero tokens, because it consumed a deadline — but the spend
+    counter only increments once a call returns, so a provider failing slowly is bounded by
+    the per-minute limit rather than by the daily one. The window is small and the per-minute
+    limit covers it; closing it properly means counting before the call and reconciling after,
+    which is more machinery than the exposure justifies.
 
 ## What I would build next
 
@@ -803,8 +867,10 @@ In this order, and for these reasons:
    and 12 are what it still cannot do. The next honest step is a real BM25 arm for prose
    questions — which needs the score floor rethought, because that is the thing currently
    holding the refusal path up.
-3. **A per-user spend cap**, using the audit table that already exists. The per-minute rate
-   limit bounds the pace of spending, not its total.
+3. **A shared spend ceiling.** The daily cap now exists, in a table of its own — the audit
+   table could not hold it without becoming a behavioural log. What is still missing is a cap
+   across *all* users, which is what an operator with a monthly budget actually wants, and
+   the reconciliation that gaps 13 and 14 describe.
 4. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
    honestly described. A NER model would raise precision above 50% without changing a single
    call site — the seam is already there.
