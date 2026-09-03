@@ -1,0 +1,1 @@
+ALTER TABLE "chunks" ADD COLUMN "content_tsv_en" "tsvector" GENERATED ALWAYS AS (to_tsvector('english', "chunks"."content")) STORED NOT NULL;

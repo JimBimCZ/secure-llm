@@ -96,6 +96,14 @@ export const documents = pgTable(
  *
  * `'simple'`, not `'english'`: the arm exists to match identifiers literally,
  * and stemming a part number can only lose information.
+ *
+ * There are TWO of these columns because the two lexical arms want opposite
+ * things from the tokenizer. `'simple'` serves the identifier arm: it matches
+ * literally, and stemming a part number can only lose information.
+ * `'english'` serves the prose arm, where stemming is the entire point —
+ * measured, a question asking what the user "underweight"s found the note
+ * headed "which I underweighted for years" at rank 7 under `simple` and rank 1
+ * under `english`.
  */
 export const chunks = pgTable(
   "chunks",
@@ -114,6 +122,9 @@ export const chunks = pgTable(
     contentTsv: tsvector("content_tsv")
       .notNull()
       .generatedAlwaysAs((): SQL => sql`to_tsvector('simple', ${chunks.content})`),
+    contentTsvEn: tsvector("content_tsv_en")
+      .notNull()
+      .generatedAlwaysAs((): SQL => sql`to_tsvector('english', ${chunks.content})`),
   },
   (table) => [
     index("chunks_owner_idx").on(table.ownerSub),

@@ -4,7 +4,8 @@ import { getEmbedder } from "@/server/ai";
 import { db } from "@/server/db";
 import { chunks, documents } from "@/server/db/schema";
 import { env } from "@/server/env";
-import { fuseByRank, type MatchedBy } from "@/server/rag/fuse";
+import { retrieveByProse } from "@/server/rag/bm25";
+import { type Arm, fuseByRank } from "@/server/rag/fuse";
 import { distinctiveTerms } from "@/server/rag/tokens";
 
 export interface RetrievedChunk {
@@ -13,17 +14,27 @@ export interface RetrievedChunk {
   filename: string;
   chunkIndex: number;
   content: string;
-  /** Cosine similarity in [0, 1]. Both embedders return unit vectors. */
+  /**
+   * Cosine similarity in [-1, 1]. Both embedders return unit vectors, so the
+   * range is the full one, not [0, 1] — a NEGATIVE value here is not a bug.
+   *
+   * A row the vector arm admitted is necessarily above RAG_MIN_SCORE. A row
+   * admitted only by a lexical arm carries its true, ungated similarity, which
+   * can sit at or below zero: for those rows the MATCH is the evidence of
+   * relevance, and the similarity is reported rather than relied on. This was
+   * always reachable through the identifier arm; the prose arm only makes it
+   * common.
+   */
   score: number;
-  /** Which arm found it. Recorded for the log; nothing branches on it. */
-  matchedBy: MatchedBy;
+  /** Which arms found it. Recorded for the log; nothing branches on it. */
+  matchedBy: Arm[];
 }
 
 /** A row as it comes back from either arm, before fusion labels it. */
 type ScoredChunk = Omit<RetrievedChunk, "matchedBy">;
 
 /**
- * Retrieval over the signed-in user's own chunks — two arms, one ranked list.
+ * Retrieval over the signed-in user's own chunks — three arms, one ranked list.
  *
  * THE VECTOR ARM is the primary one and is unchanged from when it was the only
  * one. Three things are true of its WHERE clause, and all three are
@@ -59,6 +70,21 @@ type ScoredChunk = Omit<RetrievedChunk, "matchedBy">;
  * than trusting the vector arm to have applied them. It also means an embedder
  * swap still degrades to nothing at all, instead of to a half-working app
  * answering only the questions that happen to mention a part number.
+ *
+ * THE PROSE ARM is the third, and the one that changes what a question with no
+ * identifier in it can find. The vector arm refused five of fifteen measured
+ * prose questions outright — including "what is the arithmetic I actually use
+ * for sizing?", where the corpus has a section under exactly that heading and
+ * the best chunk scored 0.173 against a 0.25 floor. It ranks by BM25 and admits
+ * by IDF-mass coverage rather than by a score floor; rag/bm25.ts is where that
+ * choice is argued.
+ *
+ * It runs on EVERY question, like the vector arm and unlike the identifier arm,
+ * which is conditional on the question — never on another arm's outcome. It is
+ * not a rescue that fires only when the vector arm came back empty: gating one
+ * arm on another's outcome would make retrieval depend on the order the arms
+ * are evaluated in, and would cost fusion its claim that every list it receives
+ * was filtered independently.
  */
 export async function retrieveChunks(
   ownerSub: string,
@@ -76,9 +102,11 @@ export async function retrieveChunks(
     filename: documents.filename,
     chunkIndex: chunks.chunkIndex,
     content: chunks.content,
-    // Selected by BOTH arms, and gated by neither on the lexical side. A chunk
-    // the embedder scored poorly still gets its true similarity reported, so
-    // `score` means the same thing on every row that leaves this function.
+    // Selected by both arms built here, and gated by neither on the lexical
+    // side; the prose arm selects the same expression for the same reason. A
+    // chunk the embedder scored poorly still gets its true similarity
+    // reported, so `score` means the same thing on every row that leaves this
+    // function.
     score: similarity,
   };
 
@@ -123,7 +151,27 @@ export async function retrieveChunks(
           .orderBy(desc(sql`ts_rank_cd(${chunks.contentTsv}, ${tsquery})`))
           .limit(env.RAG_TOP_K);
 
-  const [vectorHits, lexicalHits] = await Promise.all([byVector, byTokens]);
+  const byProse: Promise<ScoredChunk[]> = retrieveByProse({
+    ownerSub,
+    embeddingModel: embedder.model,
+    question,
+    queryVector: vector,
+    limit: env.RAG_TOP_K,
+  });
 
-  return fuseByRank(vectorHits, lexicalHits, env.RAG_TOP_K);
+  const [vectorHits, lexicalHits, proseHits] = await Promise.all([
+    byVector,
+    byTokens,
+    byProse,
+  ]);
+
+  return fuseByRank(
+    [
+      // Vector first, so ties break towards semantic similarity.
+      { arm: "vector", rows: vectorHits },
+      { arm: "lexical", rows: lexicalHits },
+      { arm: "prose", rows: proseHits },
+    ],
+    env.RAG_TOP_K,
+  );
 }
