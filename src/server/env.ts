@@ -64,6 +64,14 @@ const envSchema = z.object({
   // 0 disables it, which is what you want when a gateway in front of the app
   // already enforces a budget.
   ASK_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(0).default(20),
+  // Model calls one signed-in user may make per UTC day. The per-minute limit
+  // above bounds the PACE of spending; this bounds its TOTAL, which is the
+  // number that appears on a bill. Counted in the database rather than in
+  // memory, so it survives a restart and holds across replicas. A call is the
+  // unit because the size of one is already bounded — RAG_TOP_K chunks in,
+  // a capped answer out — so a ceiling on calls is a ceiling on money, and it
+  // is a number a user who hits it can understand. 0 disables it.
+  ASK_DAILY_CALL_LIMIT: z.coerce.number().int().min(0).default(200),
 
   // --- Retention ------------------------------------------------------
   // How long an LLM audit record (model, time, tokens, latency, outcome) is
@@ -113,6 +121,7 @@ const BUILD_PHASE_PLACEHOLDERS: Env = {
   RAG_TOP_K: 6,
   RAG_MIN_SCORE: 0.25,
   ASK_RATE_LIMIT_PER_MINUTE: 20,
+  ASK_DAILY_CALL_LIMIT: 200,
   RETENTION_AUDIT_DAYS: 30,
 };
 

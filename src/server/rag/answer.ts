@@ -5,6 +5,7 @@ import { logger } from "@/server/log/logger";
 import { createAnonymizer, type RedactionCounts } from "@/server/privacy/anonymizer";
 import { resolveCitations, type Citation } from "@/server/rag/citations";
 import { retrieveChunks, type RetrievedChunk } from "@/server/rag/retrieve";
+import { recordSpend } from "@/server/spend";
 
 export type { Citation };
 
@@ -29,7 +30,7 @@ export type AskResult =
 export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
 
 /**
- * The two things this function reaches outside itself for.
+ * The three things this function reaches outside itself for.
  *
  * Defaulted, so every call site passes a question and nothing else and no
  * wiring exists to get wrong. Named, so a test can drive the orchestration
@@ -40,17 +41,25 @@ export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
  * model to misbehave on demand is not a test, it is a hope. A stub that always
  * cites [99] reaches it in one line.
  *
- * A default parameter, not a container. There are two of them.
+ * A default parameter, not a container. There are three of them.
  */
 export interface AskDependencies {
   retrieve: (ownerSub: string, question: string) => Promise<RetrievedChunk[]>;
   /** The audited, timed-out call from ai/call.ts — the one door out. */
   answer: (input: AnswerInput) => Promise<AnswerResult>;
+  /** Adds one call to the asker's daily counter. Injected so the tests, which
+   *  may not open a connection, do not reach a database to count one. */
+  recordSpend: (
+    ownerSub: string,
+    inputTokens: number,
+    outputTokens: number,
+  ) => Promise<void>;
 }
 
 const LIVE: AskDependencies = {
   retrieve: retrieveChunks,
   answer: (input) => answerWithAudit(getLlmProvider(), input),
+  recordSpend,
 };
 
 /**
@@ -111,6 +120,19 @@ export async function askQuestion(
 
   for (const retry of [false, true]) {
     const result = await deps.answer({ ...input, retry });
+
+    // Counted here rather than in ai/call.ts, which is the one door out and is
+    // deliberately subject-free: threading a `sub` through it so it can bill
+    // someone would put identity into the one component designed not to hold
+    // any. This is the innermost place that knows both who asked and that a
+    // call was actually made — and the retry below is a second real call, so
+    // it is counted separately.
+    await deps.recordSpend(
+      ownerSub,
+      result.usage.inputTokens,
+      result.usage.outputTokens,
+    );
+
     const citations = resolveCitations(result.citations, retrieved);
 
     if (citations.length > 0 && result.answer.trim().length > 0) {
