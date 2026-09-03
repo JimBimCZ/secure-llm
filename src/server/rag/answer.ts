@@ -1,9 +1,10 @@
 import { getLlmProvider } from "@/server/ai";
 import { answerWithAudit } from "@/server/ai/call";
+import type { AnswerInput, AnswerResult } from "@/server/ai/types";
 import { logger } from "@/server/log/logger";
 import { createAnonymizer, type RedactionCounts } from "@/server/privacy/anonymizer";
 import { resolveCitations, type Citation } from "@/server/rag/citations";
-import { retrieveChunks } from "@/server/rag/retrieve";
+import { retrieveChunks, type RetrievedChunk } from "@/server/rag/retrieve";
 
 export type { Citation };
 
@@ -26,6 +27,31 @@ export type AskResult =
 
 /** The text shown for every not_found outcome. One sentence, no hedging. */
 export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
+
+/**
+ * The two things this function reaches outside itself for.
+ *
+ * Defaulted, so every call site passes a question and nothing else and no
+ * wiring exists to get wrong. Named, so a test can drive the orchestration
+ * below without a database, an embedder or an API key — including the one
+ * branch nothing else can reach. The citation guard's rejection path fires
+ * when a model cites a source it was not given, and no provider in this
+ * repository does that: the mock cites what it extracted, and asking a real
+ * model to misbehave on demand is not a test, it is a hope. A stub that always
+ * cites [99] reaches it in one line.
+ *
+ * A default parameter, not a container. There are two of them.
+ */
+export interface AskDependencies {
+  retrieve: (ownerSub: string, question: string) => Promise<RetrievedChunk[]>;
+  /** The audited, timed-out call from ai/call.ts — the one door out. */
+  answer: (input: AnswerInput) => Promise<AnswerResult>;
+}
+
+const LIVE: AskDependencies = {
+  retrieve: retrieveChunks,
+  answer: (input) => answerWithAudit(getLlmProvider(), input),
+};
 
 /**
  * Question in, cited answer out — or nothing.
@@ -53,11 +79,12 @@ export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
 export async function askQuestion(
   ownerSub: string,
   question: string,
+  deps: AskDependencies = LIVE,
 ): Promise<AskResult> {
   // Retrieval runs on the ORIGINAL text: embeddings are computed in-process
   // (nothing leaves), and searching redacted text would mean searching for
   // placeholders instead of for what the user actually asked about.
-  const retrieved = await retrieveChunks(ownerSub, question);
+  const retrieved = await deps.retrieve(ownerSub, question);
 
   // Nothing cleared the similarity floor. The corpus does not cover this, and
   // no model call is made — asking anyway would invite an ungrounded answer.
@@ -83,7 +110,7 @@ export async function askQuestion(
   };
 
   for (const retry of [false, true]) {
-    const result = await answerWithAudit(getLlmProvider(), { ...input, retry });
+    const result = await deps.answer({ ...input, retry });
     const citations = resolveCitations(result.citations, retrieved);
 
     if (citations.length > 0 && result.answer.trim().length > 0) {
