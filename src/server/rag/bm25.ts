@@ -37,10 +37,30 @@ import { db } from "@/server/db";
  * denominator at maximum IDF, so asking about something absent LOWERS coverage
  * rather than being quietly ignored.
  *
- * Measured separation on the seed corpus: eight answerable questions scored
- * 1.00, 1.00, 1.00, 0.79, 0.70, 0.69, 0.63 and 0.34; six unanswerable ones
- * scored 0.23, 0.16, 0.13, and three returned no rows at all because `english`
- * strips the stopwords and nothing survived that the corpus contains.
+ * WHY COVERAGE ALONE IS NOT ENOUGH. A share cannot express how much the
+ * question asked. Coverage divides by the question's own IDF mass, so that mass
+ * cancels and never reaches the test: a question that reduces to ONE content
+ * lexeme scores 1.000 against itself on every chunk containing that lexeme.
+ * Measured on this corpus, "what happened?", "is it good?", "what year is it?",
+ * "notes" and "power" each admitted the full page at coverage 1.000 — 31 of 53
+ * chunks qualify for "notes", 18 for "power". That is not a ranking wobble but
+ * a hole in the refusal path: answer.ts refuses before a model call only when
+ * retrieval came back empty, so a vacuous question would have reached the model
+ * and the refusal would have rested on the model obeying its prompt. Exactly
+ * the outcome the paragraph above says was rejected.
+ *
+ * So admission is BOTH conditions: at least half the question's IDF mass, AND
+ * at least two DISTINCT query lexemes matched. Two, because one word is not a
+ * question — it is a topic, and a topic matches a whole notebook. It needs no
+ * new tunable and it is checked in the same SQL predicate as ownership, never
+ * in TypeScript.
+ *
+ * Measured separation on the seed corpus, over FULL-SENTENCE questions only —
+ * it says nothing about the short ones above, which is the whole point of the
+ * second condition: eight answerable questions scored 1.00, 1.00, 1.00, 0.79,
+ * 0.70, 0.69, 0.63 and 0.34; six unanswerable ones scored 0.23, 0.16, 0.13, and
+ * three returned no rows at all because `english` strips the stopwords and
+ * nothing survived that the corpus contains.
  */
 
 /**
@@ -62,7 +82,18 @@ const B = 0.75;
 const MIN_COVERAGE = 0.5;
 
 /**
- * The three constants above are interpolated into the SQL as LITERALS rather
+ * The number of DISTINCT query lexemes a chunk must match to be admitted.
+ *
+ * The second half of the rule, and the one coverage cannot express: a share
+ * divides the question's IDF mass out again, so a one-lexeme question is
+ * 100% covered by anything containing that lexeme. Two is not tuned — it is
+ * the smallest number that makes the sentence "one word is not a question"
+ * true in code. A single word is a topic, and a topic matches a notebook.
+ */
+const MIN_TERMS = 2;
+
+/**
+ * The four constants above are interpolated into the SQL as LITERALS rather
  * than bound as parameters. Two reasons, in this order:
  *
  * - Postgres cannot infer a type for a bare parameter inside an arithmetic
@@ -76,6 +107,7 @@ const MIN_COVERAGE = 0.5;
 const k1 = sql.raw(String(K1));
 const b = sql.raw(String(B));
 const minCoverage = sql.raw(String(MIN_COVERAGE));
+const minTerms = sql.raw(String(MIN_TERMS));
 
 /** A chunk the prose arm admitted. Same shape every arm returns. */
 export interface ProseHit {
@@ -152,7 +184,8 @@ export async function retrieveByProse(params: {
       SELECT p.id,
              sum(i.idf * (p.tf * (${k1} + 1))
                  / (p.tf + ${k1} * (1 - ${b} + ${b} * l.dl / st.avgdl))) AS bm25,
-             sum(i.idf) / (SELECT total FROM mass) AS coverage
+             sum(i.idf) / (SELECT total FROM mass) AS coverage,
+             count(DISTINCT p.lexeme) AS terms
       FROM postings p
       JOIN idf i USING (lexeme)
       JOIN lengths l ON l.id = p.id
@@ -164,8 +197,14 @@ export async function retrieveByProse(params: {
     FROM scored sc
     JOIN scope s ON s.id = sc.id
     JOIN documents d ON d.id = s.document_id
+    -- Both halves of the admission rule, in the same predicate as the
+    -- ownership filter. Never in TypeScript: a row this query returns is a row
+    -- the app is willing to cite.
     WHERE sc.coverage >= ${minCoverage}
-    ORDER BY sc.bm25 DESC
+      AND sc.terms >= ${minTerms}
+    -- s.id breaks ties, so which rows survive LIMIT does not depend on the
+    -- plan Postgres happened to choose.
+    ORDER BY sc.bm25 DESC, s.id
     LIMIT ${limit}
   `);
 

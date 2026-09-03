@@ -1,20 +1,23 @@
 /**
  * Combining the retrieval arms into one ranked list.
  *
- * The arms score in units that cannot be compared. The vector arm produces a
- * cosine similarity in [0, 1]; the lexical arm produces a text rank that is
- * unbounded and depends on how common the words are in this particular corpus.
- * Normalising one onto the other would mean inventing a conversion and then
- * defending a number nobody can derive. Their RANKS, though, are directly
- * comparable — "this arm's best hit" means the same thing in both.
+ * The three arms score in units that cannot be compared. The vector arm orders
+ * by cosine similarity, which lies in [-1, 1] and is only bounded below by
+ * RAG_MIN_SCORE for the rows that arm itself admitted; the identifier arm
+ * orders by a text rank that is unbounded and depends on how common the words
+ * are in this particular corpus; the prose arm orders by BM25, which is
+ * unbounded again and on a different scale from either. Normalising them onto
+ * one another would mean inventing two conversions and then defending numbers
+ * nobody can derive. Their RANKS, though, are directly comparable — "this
+ * arm's best hit" means the same thing in all three.
  *
  * Hence reciprocal rank fusion: each arm contributes 1/(K + rank) to a chunk's
- * score, and a chunk both arms found gets both contributions. It is the
- * standard method for exactly this problem, it has one constant, and it needs
- * no tuning against this corpus.
+ * score, and a chunk found by more than one arm collects a contribution from
+ * each. It is the standard method for exactly this problem, it has one
+ * constant, and it needs no tuning against this corpus.
  *
- * What this function must NOT do is decide relevance. Both lists arrive already
- * filtered in SQL — by owner, by embedding model, and each by its own
+ * What this function must NOT do is decide relevance. Every list arrives
+ * already filtered in SQL — by owner, by embedding model, and each by its own
  * admission rule — so every row here has earned its place. Fusion only orders,
  * and an empty result stays empty, because retrieval returning nothing is what
  * produces "Not found in your knowledge base." without a model call.
@@ -22,9 +25,9 @@
 
 /**
  * The conventional constant from the original RRF paper. It damps the
- * difference between the top ranks, so a chunk found by both arms outranks one
+ * difference between the top ranks, so a chunk found by two arms outranks one
  * found first by a single arm — which is the behaviour we want, and the reason
- * a hybrid list beats either arm alone.
+ * a hybrid list beats any one arm alone.
  */
 const K = 60;
 
