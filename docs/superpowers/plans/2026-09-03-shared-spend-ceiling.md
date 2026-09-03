@@ -943,7 +943,7 @@ nothing about anyone else."
 
 **Interfaces:**
 - Consumes: `deploymentSpend` (Task 1), `currentWindowStart` (already exported).
-- Produces: `/api/admin/stats` response shape `{ knownUsers: number; today: { calls: number; limit: number } }`.
+- Produces: `/api/admin/stats` response shape `{ knownUsers: number; today: { calls: number; inputTokens: number; outputTokens: number; limit: number } }`.
 
 - [ ] **Step 1: Purge the shared counter on the same rule**
 
@@ -1098,18 +1098,19 @@ This is the controlling verification. The reservation is SQL, the suite opens no
 
 - [ ] **Step 1: Bring the stack up with small ceilings**
 
-In `.env` (local, git-ignored — do not commit it):
+**Do not edit `.env`.** CLAUDE.md §8 forbids touching it, and there is no need: Docker Compose reads shell environment variables in preference to the `.env` file, so the whole measurement runs from the command line and leaves the developer's configuration exactly as it was.
 
+Run:
+
+```bash
+LLM_PROVIDER=mock \
+ASK_DAILY_CALL_LIMIT=0 \
+ASK_DAILY_CALL_LIMIT_TOTAL=5 \
+ASK_RATE_LIMIT_PER_MINUTE=0 \
+docker compose up --build -d
 ```
-LLM_PROVIDER=mock
-ASK_DAILY_CALL_LIMIT=0
-ASK_DAILY_CALL_LIMIT_TOTAL=5
-ASK_RATE_LIMIT_PER_MINUTE=0
-```
 
-`ASK_RATE_LIMIT_PER_MINUTE=0` is deliberate: the per-minute limiter would otherwise mask the very burst this measures.
-
-Run: `docker compose up --build`
+`ASK_RATE_LIMIT_PER_MINUTE=0` is deliberate: the per-minute limiter would otherwise refuse the burst before the daily ceiling ever saw it, and mask the very thing being measured.
 
 Expected: migrations apply including `0007_deployment_spend`, and the app becomes healthy. Confirm with `curl -s localhost:3000/api/health`.
 
@@ -1156,7 +1157,7 @@ Expected: `{"error":"This deployment has reached today's question limit."}` with
 
 - [ ] **Step 6: Repeat against the per-user ceiling — this is gap 13**
 
-Set `ASK_DAILY_CALL_LIMIT=5` and `ASK_DAILY_CALL_LIMIT_TOTAL=0`, restart, and repeat steps 3–4 reading `user_spend` instead:
+Restart with `ASK_DAILY_CALL_LIMIT=5` and `ASK_DAILY_CALL_LIMIT_TOTAL=0` on the command line (never in `.env`), and repeat steps 3–4 reading `user_spend` instead:
 
 ```bash
 docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
@@ -1167,7 +1168,7 @@ Expected: `calls = 5` exactly, and the personal sentence (`You have reached toda
 
 - [ ] **Step 7: Confirm a failed call is charged — this is gap 14**
 
-Set `ASK_DAILY_CALL_LIMIT=5`, `ASK_DAILY_CALL_LIMIT_TOTAL=0` and `LLM_TIMEOUT_MS=1` so every call times out, restart, and ask one question.
+Restart with `ASK_DAILY_CALL_LIMIT=5`, `ASK_DAILY_CALL_LIMIT_TOTAL=0` and `LLM_TIMEOUT_MS=1` on the command line so every call times out, then ask one question.
 
 Expected: the question fails, `llm_calls` gains a row with outcome `timeout` and zero tokens (as before), **and** `user_spend.calls` is now `1` rather than `0`. Before this slice it stayed `0`. **Write both down.**
 
@@ -1194,9 +1195,9 @@ docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
 
 Expected: one row, today's. The seeded row for yesterday is gone.
 
-- [ ] **Step 10: Restore your `.env`**
+- [ ] **Step 10: Tear the measurement stack down**
 
-Put `LLM_TIMEOUT_MS`, `ASK_RATE_LIMIT_PER_MINUTE`, `ASK_DAILY_CALL_LIMIT` and `ASK_DAILY_CALL_LIMIT_TOTAL` back to the values you want to keep. `.env` is git-ignored and must not be committed.
+Nothing to restore: every override lived on the command line, so `.env` was never touched and there is no configuration to put back. Bring the stack down with `docker compose down -v` if you want the measurement's rows gone, or leave it running.
 
 There is nothing to commit in this task. Its output is the numbers.
 
