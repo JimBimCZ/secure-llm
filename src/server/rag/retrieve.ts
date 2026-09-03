@@ -5,7 +5,7 @@ import { db } from "@/server/db";
 import { chunks, documents } from "@/server/db/schema";
 import { env } from "@/server/env";
 import { fuseByRank, type MatchedBy } from "@/server/rag/fuse";
-import { distinctiveTokens } from "@/server/rag/tokens";
+import { distinctiveTerms } from "@/server/rag/tokens";
 
 export interface RetrievedChunk {
   id: string;
@@ -95,15 +95,25 @@ export async function retrieveChunks(
     .orderBy(desc(similarity))
     .limit(env.RAG_TOP_K);
 
-  // `plainto_tsquery` ANDs its terms, which is the strict reading and the one
-  // we want: asking about "ddr5-6000 CL30" should reach the chunk discussing
-  // both, not every chunk mentioning either. The tokens are bound as a
-  // parameter, so a question can never write the query it is searched with.
-  const tokens = distinctiveTokens(question);
-  const tsquery = sql`plainto_tsquery('simple', ${tokens.join(" ")})`;
+  // One `phraseto_tsquery` per term, ANDed together. Two properties, both
+  // wanted: asking about "ddr5-6000 CL30" reaches the chunk discussing BOTH
+  // rather than every chunk mentioning either, and a term that is two words
+  // ("lga 1718") demands they sit ADJACENT in the chunk. The second is what
+  // makes the bare number in such a pair safe to search for at all — it is
+  // never looked for on its own. For a one-word term this is exactly what
+  // `plainto_tsquery` did before, so nothing about the existing behaviour
+  // moves. Every term is bound as a parameter, so a question can never write
+  // the query it is searched with.
+  const terms = distinctiveTerms(question);
+  // Parenthesised, because `@@` binds tighter than `&&`: without the brackets
+  // `tsv @@ a && b` parses as `(tsv @@ a) && b` and Postgres rejects it.
+  const tsquery = sql`(${sql.join(
+    terms.map((term) => sql`phraseto_tsquery('simple', ${term})`),
+    sql` && `,
+  )})`;
 
   const byTokens: Promise<ScoredChunk[]> =
-    tokens.length === 0
+    terms.length === 0
       ? Promise.resolve([])
       : db
           .select(columns)
