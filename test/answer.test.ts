@@ -377,4 +377,99 @@ describe("askQuestionStream", () => {
 
     assert.equal(events[0]?.type, "privacy");
   });
+
+  it("answers when the whole answer is held back by the restorer", async () => {
+    // "[TBD" is withheld by the restorer until flush, which used to mean the
+    // citations gate never opened and a valid answer was refused.
+    const model = stubStream([1], ["[TBD"]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    assert.equal(events.at(-1)?.type, "done");
+    assert.equal(
+      events
+        .filter((e) => e.type === "delta")
+        .map((e) => e.text)
+        .join(""),
+      "[TBD",
+    );
+  });
+
+  it("streams the answer byte for byte, leading whitespace included", async () => {
+    // The non-streaming path returned the model's answer verbatim. Text the
+    // gate held back while waiting for something visible is shown, not dropped.
+    const model = stubStream([1], ["   ", "750 W."]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    assert.equal(
+      events
+        .filter((e) => e.type === "delta")
+        .map((e) => e.text)
+        .join(""),
+      "   750 W.",
+    );
+  });
+
+  it("records spend even when the consumer stops reading", async () => {
+    // A reserved call that the client walked away from is still a call that
+    // was made. Nothing downstream charges it if this does not.
+    const charged: number[][] = [];
+    const model = stubStream([1], ["750 ", "W."]);
+    const stream = askQuestionStream("alice", "how big is the PSU?", {
+      ...deps(sources, {
+        answer: async () => {
+          throw new Error("unused");
+        },
+      }),
+      answerStream: () => model(),
+      recordTokens: async (_sub, i, o) => {
+        charged.push([i, o]);
+      },
+    });
+
+    for await (const event of stream) if (event.type === "delta") break;
+
+    assert.equal(charged.length, 1);
+  });
+
+  it("ignores a second citations set", async () => {
+    // A later set cannot retroactively justify prose already shown, and must
+    // not slip past a gate the first set opened.
+    const model = async function* () {
+      yield { type: "citations", citations: [1] };
+      yield { type: "delta", text: "750 W." };
+      yield { type: "citations", citations: [99] };
+      yield { type: "usage", inputTokens: 1, outputTokens: 1 };
+    };
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model() as AsyncGenerator<AnswerStreamEvent>,
+      }),
+    );
+
+    assert.equal(events.at(-1)?.type, "done");
+    assert.equal(events.filter((e) => e.type === "citations").length, 1);
+  });
 });

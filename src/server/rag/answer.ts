@@ -260,55 +260,92 @@ export async function* askQuestionStream(
     let returnedCitations = 0;
     let usage = { inputTokens: 0, outputTokens: 0 };
     let emittedCitations = false;
-    let emittedText = false;
+    let sawCitations = false;
+    // Text released by the restorer but not yet shown, because nothing
+    // visible has arrived yet. Kept rather than dropped so the streamed text
+    // is byte-identical to what the non-streaming path returned: a model that
+    // opens with whitespace still gets that whitespace shown.
+    let pending = "";
     // Back to plain text on the way out, a piece at a time. The citations keep
     // the original chunk content, which the user owns and is entitled to read.
     const restorer = createRestorer((text) => anonymizer.restore(text));
 
-    for await (const event of stream) {
-      if (event.type === "usage") {
-        usage = {
-          inputTokens: event.inputTokens,
-          outputTokens: event.outputTokens,
-        };
-        continue;
-      }
-
-      if (event.type === "citations") {
-        returnedCitations = event.citations.length;
-        citations = resolveCitations(event.citations, retrieved);
-        // Nothing is emitted here. An invalid set means this attempt is over,
-        // and the user has been shown nothing to take back.
-        if (citations.length === 0) break;
-        continue;
-      }
-
-      // A delta before any citations event, or after a rejected one, is prose
-      // with nothing to justify it. Dropped rather than shown.
-      if (citations.length === 0) continue;
-
-      const text = restorer.push(event.text);
-      if (text.length === 0) continue;
-
-      if (!emittedCitations && text.trim().length > 0) {
-        yield { type: "citations", citations };
-        emittedCitations = true;
-      }
+    /**
+     * The ONE gate every piece of prose passes through, whether it came from
+     * `push()` during the stream or from `flush()` at the end.
+     *
+     * Having two gates is how the first version refused a valid answer: an
+     * answer held back in its entirety by the restorer (one starting `[` with
+     * no `]` within the placeholder window) produced nothing from `push()`, so
+     * the citations event never opened, and `flush()`'s tail was then dropped
+     * for want of it.
+     *
+     * It also holds the guard's second half: citations resolve, AND the answer
+     * has visible content. Until something non-blank arrives, nothing is shown
+     * and nothing is committed to.
+     */
+    const release = function* (text: string): Generator<AskEvent> {
+      if (text.length === 0 || citations.length === 0) return;
 
       if (emittedCitations) {
-        emittedText = true;
         yield { type: "delta", text };
+        return;
       }
+
+      pending += text;
+      if (pending.trim().length === 0) return;
+
+      emittedCitations = true;
+      yield { type: "citations", citations };
+      yield { type: "delta", text: pending };
+      pending = "";
+    };
+
+    try {
+      for await (const event of stream) {
+        if (event.type === "usage") {
+          usage = {
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+          };
+          continue;
+        }
+
+        if (event.type === "citations") {
+          // The first set is the one the guard rules on. A second set cannot
+          // retroactively justify prose already shown, and must not be able to
+          // slip past a gate the first set already opened.
+          if (sawCitations) continue;
+          sawCitations = true;
+          returnedCitations = event.citations.length;
+          citations = resolveCitations(event.citations, retrieved);
+          // Nothing is emitted here. An invalid set means this attempt is over,
+          // and the user has been shown nothing to take back.
+          if (citations.length === 0) break;
+          continue;
+        }
+
+        // A delta before any citations event, or after a rejected one, is prose
+        // with nothing to justify it. `release` drops it rather than show it.
+        yield* release(restorer.push(event.text));
+      }
+
+      yield* release(restorer.flush());
+    } finally {
+      // The call was charged above, before it was made. Only its cost is known
+      // now, and only now can it be recorded.
+      //
+      // In a `finally`, so it runs even when the consumer stops iterating — a
+      // client disconnect must not turn a call we already reserved into one we
+      // never charged.
+      await deps.recordTokens(ownerSub, usage.inputTokens, usage.outputTokens);
     }
 
-    const tail = restorer.flush();
-    if (emittedCitations && tail.length > 0) yield { type: "delta", text: tail };
-
-    // The call was charged above, before it was made. Only its cost is known
-    // now, and only now can it be recorded.
-    await deps.recordTokens(ownerSub, usage.inputTokens, usage.outputTokens);
-
-    if (emittedCitations && emittedText) {
+    // Both halves of the guard are already spent by the time we get here:
+    // citations resolved at the `resolveCitations` call above, and visible
+    // content at the `pending.trim()` check inside `release`. This flag is set
+    // only when both passed, so there is one condition to test, not two.
+    if (emittedCitations) {
       logger.info(
         {
           sub: ownerSub,
