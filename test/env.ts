@@ -27,6 +27,9 @@ const DEFAULTS: Record<string, string> = {
   OIDC_CLIENT_ID: "test-client",
   OIDC_CLIENT_SECRET: "test-client-secret",
   EMBEDDING_PROVIDER: "mock",
+  // No test loads a model. `answer.test.ts` reaches the detector factory
+  // through askQuestion, so without this the suite would try to.
+  ANONYMIZER_PROVIDER: "heuristic",
   LLM_PROVIDER: "mock",
   LLM_MODEL: "test-model",
 };

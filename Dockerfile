@@ -21,10 +21,10 @@ COPY . .
 # validation during the build phase and the server validates for real at startup.
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Bake the embedding model into the image. The runtime has remote model loading
-# disabled, so this is the only chance to fetch it — and it means the container
-# needs no network at all.
-RUN node scripts/fetch-model.mjs
+# Bake the models into the image. The runtime has remote model loading
+# disabled, so this is the only chance to fetch them — and it means the
+# container needs no network at all.
+RUN node scripts/fetch-models.mjs
 
 RUN npm run build
 

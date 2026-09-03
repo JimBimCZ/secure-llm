@@ -2,7 +2,7 @@ import { getLlmProvider } from "@/server/ai";
 import { answerWithAudit } from "@/server/ai/call";
 import type { AnswerInput, AnswerResult } from "@/server/ai/types";
 import { logger } from "@/server/log/logger";
-import { createHeuristicDetector } from "@/server/privacy/detectors/heuristic";
+import { getPersonDetector } from "@/server/privacy/detectors";
 import { createAnonymizer, type RedactionCounts } from "@/server/privacy/anonymizer";
 import { resolveCitations, type Citation } from "@/server/rag/citations";
 import { retrieveChunks, type RetrievedChunk } from "@/server/rag/retrieve";
@@ -125,7 +125,7 @@ export async function askQuestion(
     return { status: "not_found", reason: "no_relevant_chunks" };
   }
 
-  const anonymizer = createAnonymizer(createHeuristicDetector());
+  const anonymizer = createAnonymizer(getPersonDetector());
   const redactedQuestion = await anonymizer.redact(question);
   // Sequential, and measured: batching the chunks into one model call was
   // slower than this, because the pipeline pads every input to the longest.
