@@ -189,4 +189,38 @@ describe("anonymizer", () => {
     assert.match(chunk, /\[PERSON_1\]/);
     assert.equal(a.counts().persons, 1);
   });
+
+  it("redacts an unlisted first name whole when it sits next to a known surname", async () => {
+    // The one input class whose behaviour the seam changed. The old
+    // anonymizer ran the dictionary first and only ran the bigram over what
+    // was left, so "Jana Dvořák" came out as "Jana [PERSON_1]" — the
+    // dictionary catching just the surname. This detector runs the
+    // dictionary and the bigram over the same original text, because
+    // detection must not have to reason about another pass's placeholders,
+    // so the bigram now sees "Jana Dvořák" whole and wins on length. "Jana"
+    // is not in names.ts; "Dvořák" is. This is strictly more redaction, and
+    // over-redaction is the direction this whole heuristic is safe in: the
+    // model reasons over an opaque token, and restore() puts the real name
+    // back before the user ever sees the placeholder.
+    const a = createAnonymizer(createHeuristicDetector());
+
+    const redacted = await a.redact("Jana Dvořák tuned the fan curve.");
+
+    assert.equal(redacted, "[PERSON_1] tuned the fan curve.");
+    assert.equal(a.restore(redacted), "Jana Dvořák tuned the fan curve.");
+  });
+
+  it("ignores an empty or whitespace-only detected value", async () => {
+    // A detector that stitches wordpieces can produce "" from a token that is
+    // exactly "##". Without a guard, "".split() matches between every
+    // character, so redact would insert a placeholder after every single
+    // character in the text — corruption, not a miss.
+    const a = createAnonymizer(stub("", "  ", "David Kraus"));
+    const text = "Ask David Kraus about the fan curve.";
+
+    const redacted = await a.redact(text);
+
+    assert.equal(redacted, "Ask [PERSON_1] about the fan curve.");
+    assert.equal(a.counts().persons, 1);
+  });
 });

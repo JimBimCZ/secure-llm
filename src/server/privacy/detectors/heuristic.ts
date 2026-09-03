@@ -14,6 +14,17 @@ import type { PersonDetector } from "@/server/privacy/detectors/types";
  * load no model, and it is what a build without the NER weights runs. Its
  * over-redaction was always the safe direction — a redacted `Arrow Lake` is
  * restored before the user sees it — so keeping it costs nothing.
+ *
+ * BEHAVIOURAL DIVERGENCE from the pre-seam anonymizer: the old code ran the
+ * dictionary over the whole text, then ran the bigram only over what the
+ * dictionary had NOT already replaced with a placeholder — so "Jana Dvořák"
+ * became "Jana [PERSON_1]", the dictionary catching just the surname. This
+ * detector runs both passes over the same original text (the seam requires
+ * that: a detector reasoning over another detector's placeholders is not a
+ * thing this design allows), so the bigram sees "Jana Dvořák" whole and wins
+ * on length, redacting the full span. This is deliberate, not a regression:
+ * it is strictly more redaction, and over-redaction is the safe direction
+ * this same docblock already argues for above.
  */
 
 /**

@@ -79,6 +79,12 @@ export function createAnonymizer(detector: PersonDetector): Anonymizer {
       out = out.replace(PHONE, (m) => placeholderFor(m, "PHONE"));
 
       for (const name of names) {
+        // An empty or whitespace-only value is not merely useless: "".split()
+        // matches between every character, so out.split(name).join(placeholder)
+        // would insert a placeholder after every single character in the
+        // text — total corruption, not a miss. A detector that stitches
+        // wordpieces can produce one from a token that is exactly "##".
+        if (!name.trim()) continue;
         // Not found means one of two harmless things: the value sat inside an
         // e-mail that is already a placeholder, or a detector reconstructed a
         // string that was never in the text. Either way it replaces nothing,
