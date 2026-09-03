@@ -45,7 +45,7 @@ export type AskResult =
 export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
 
 /**
- * The three things this function reaches outside itself for.
+ * The four things this function reaches outside itself for.
  *
  * Defaulted, so every call site passes a question and nothing else and no
  * wiring exists to get wrong. Named, so a test can drive the orchestration
@@ -54,9 +54,12 @@ export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
  * when a model cites a source it was not given, and no provider in this
  * repository does that: the mock cites what it extracted, and asking a real
  * model to misbehave on demand is not a test, it is a hope. A stub that always
- * cites [99] reaches it in one line.
+ * cites [99] reaches it in one line. The same reason splits spending in two:
+ * `reserveCall` lets a test drive the ceiling without a connection, and
+ * `recordTokens` lets it assert what a completed call was charged, separately
+ * from whether it was allowed to happen at all.
  *
- * A default parameter, not a container. There are three of them.
+ * A default parameter, not a container. There are four of them.
  */
 export interface AskDependencies {
   retrieve: (ownerSub: string, question: string) => Promise<RetrievedChunk[]>;
