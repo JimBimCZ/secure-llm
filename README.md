@@ -84,10 +84,12 @@ stack, with the corpus already loaded.
 3. **The part-number question vector search alone gets wrong.** Ask *"What are PL1 and PL2
    set to?"* The embedder scores the chunks that answer it at 0.054 and 0.063 — far under the
    0.25 floor — so vector search alone returns nothing and the app would refuse. The exact
-   match on `pl1`/`pl2` finds them, and the answer comes back cited. The server logs a non-zero
-   `lexicalHits` — the count of chunks some non-vector arm found, which was 2 when the identifier
-   arm was the only one of them and can now be higher, since the prose arm counts in the same
-   field. Then ask *"What did I write about LGA 1718?"* — the same failure in the two-token
+   match on `pl1`/`pl2` finds them, and the answer comes back cited. The server logs
+   `"lexicalHits":2` — the count of chunks some non-vector arm found. That field now counts
+   either lexical arm, and it is still 2 here: on a question that names a part number the prose
+   arm adds nothing the exact match had not already found, which is the division of labour
+   working as intended. Then ask *"What did I write about LGA 1718?"* — the same failure in the
+   two-token
    form, and the sharper one: the corpus defines that socket in as many words, and the vector
    arm's best chunk scores **0.236** against the 0.25 floor, so the app used to refuse. The
    pair `lga 1718` is searched for as a phrase and the citation lands on the line that defines
