@@ -1,7 +1,9 @@
 import { z } from "zod";
 
 import { authErrorResponse, requireUser } from "@/server/auth/guard";
+import { logger } from "@/server/log/logger";
 import { askQuestion } from "@/server/rag/answer";
+import { consumeAskQuota } from "@/server/rateLimit";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +21,20 @@ const askSchema = z.object({
 export async function POST(request: Request) {
   try {
     const { sub } = await requireUser();
+
+    // Before the body is even read: a denied request must cost nothing but the
+    // session lookup that identified who to deny.
+    const quota = consumeAskQuota(sub);
+    if (!quota.allowed) {
+      logger.warn({ sub, outcome: "rate_limited" }, "ask");
+      return Response.json(
+        { error: "Too many questions. Try again in a moment." },
+        {
+          status: 429,
+          headers: { "retry-after": String(quota.retryAfterSeconds) },
+        },
+      );
+    }
 
     const parsed = askSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) {
