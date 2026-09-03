@@ -549,7 +549,7 @@ Expected: errors ONLY in `src/server/rag/answer.ts` (it still imports the delete
 
 If `setWhere` is rejected by drizzle-orm 0.45.2's types, fall back to `db.execute(sql\`…\`)` for the two upserts — `src/server/rag/bm25.ts` already does that for the same reason. The SQL is what ships either way.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add src/server/spend.ts
@@ -701,7 +701,7 @@ and add this `describe` block inside the outer `describe("askQuestion", …)`, a
 
 Run: `npm test`
 
-Expected: FAIL. The `deps` helper no longer type-checks against `AskDependencies` (which still requires `recordSpend`), and `budget_exhausted` is not a member of `AskResult`.
+Expected: FAIL — at runtime, not at compile time. `node --test` strips types rather than checking them, so this does **not** surface as a type error. The four new tests fail with `TypeError: deps.recordSpend is not a function` (the loop still calls the member the new `deps` helper no longer supplies), and the existing tests fail the same way. Do not go looking for a compile error; there will not be one until `npm run typecheck` in step 8.
 
 - [ ] **Step 3: Widen `AskResult`**
 
@@ -1332,7 +1332,18 @@ spent by someone else is not the reader having asked too many questions, and
 the app should not tell them it is.
 ```
 
-- [ ] **Step 7: Write the decisions entries**
+- [ ] **Step 7: Document the admin endpoint's new field**
+
+The README describes `/api/admin/stats` as the endpoint that demonstrates the role split. Add a sentence where it does, saying it now also reports the shared ceiling:
+
+```markdown
+It also reports today's shared spend — `today.calls` against `today.limit` —
+because a ceiling an operator cannot observe is how `ASK_RATE_LIMIT_PER_MINUTE`
+and `ASK_DAILY_CALL_LIMIT` each spent a slice silently pinned to their defaults
+in Docker. It names no user, because the table it reads holds none.
+```
+
+- [ ] **Step 8: Write the decisions entries**
 
 Append to `docs/decisions.md`, under a new `## Slice 15 — a shared spend ceiling` heading, one entry per decision in the file's established `YYYY-MM-DD — <decision> — <why> — <what was rejected>` form. At minimum:
 
@@ -1344,17 +1355,17 @@ Append to `docs/decisions.md`, under a new `## Slice 15 — a shared spend ceili
 - A distinct sentence for the shared refusal — rejected reusing the personal one, which tells a user who asked two questions that they asked too many.
 - The reservation SQL has no unit test, again — slice 14's gap 23 reason unchanged, and the controlling verification is the measured burst — rejected a TypeScript reimplementation of the predicate, which tests the copy.
 
-- [ ] **Step 8: Mark the spec implemented**
+- [ ] **Step 9: Mark the spec implemented**
 
 In `docs/superpowers/specs/2026-09-03-shared-spend-ceiling-design.md`, change `**Status:** designed` to `**Status:** implemented`, and if anything shipped differently from §3–§7, add a short *Deviations, as built* section saying what and why — the slice 14 spec does this and it is the honest habit.
 
-- [ ] **Step 9: Final check**
+- [ ] **Step 10: Final check**
 
 Run: `npm run typecheck && npm test`
 
 Expected: both clean.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add README.md docs/decisions.md docs/superpowers/specs/2026-09-03-shared-spend-ceiling-design.md
