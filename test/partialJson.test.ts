@@ -41,4 +41,14 @@ describe("readPartial", () => {
       assert.doesNotThrow(() => readPartial(bad));
     }
   });
+
+  it("does not mistake a later array for the citations value", () => {
+    assert.equal(readPartial('{"citations": "nope", "other": [1,2]}').citations, null);
+    assert.equal(readPartial('{"citations": {"ids": [1, 2]}, "answer": "x"}').citations, null);
+  });
+
+  it("does not mistake a later string for the answer value", () => {
+    assert.equal(readPartial('{"answer": 42, "citations": ["oops"], "other": "leaked"}').answerSoFar, "");
+    assert.equal(readPartial('{"citations": [1,2], "answer": 42, "foo": "leaked"}').answerSoFar, "");
+  });
 });

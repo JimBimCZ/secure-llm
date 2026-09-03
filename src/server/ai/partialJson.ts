@@ -44,11 +44,32 @@ export function readPartial(accumulated: string): PartialAnswer {
   return { citations: readCitations(body), answerSoFar: readAnswer(body) };
 }
 
-function readCitations(body: string): number[] | null {
-  const key = body.indexOf(CITATIONS_KEY);
-  if (key === -1) return null;
+/**
+ * The offset of `key`'s value, but only when that value actually starts with
+ * `delimiter`.
+ *
+ * Anchoring matters more here than it looks. A bare `indexOf` for the `[` or
+ * the `"` will happily walk past a value of the wrong type and latch onto the
+ * next one anywhere later in the buffer — which is how a response whose
+ * `citations` is a string came back reporting a complete citation array that
+ * appears nowhere in it. Returning -1 for a value that is not the shape the
+ * contract promises keeps the "never a guess" rule this file opens with.
+ */
+function valueStart(body: string, key: string, delimiter: string): number {
+  const at = body.indexOf(key);
+  if (at === -1) return -1;
 
-  const open = body.indexOf("[", key + CITATIONS_KEY.length);
+  let i = at + key.length;
+  while (i < body.length && /\s/.test(body[i]!)) i += 1;
+  if (body[i] !== ":") return -1;
+
+  i += 1;
+  while (i < body.length && /\s/.test(body[i]!)) i += 1;
+  return body[i] === delimiter ? i : -1;
+}
+
+function readCitations(body: string): number[] | null {
+  const open = valueStart(body, CITATIONS_KEY, "[");
   if (open === -1) return null;
 
   // No nesting to worry about: the contract says integers, so the first `]`
@@ -68,10 +89,7 @@ function readCitations(body: string): number[] | null {
 }
 
 function readAnswer(body: string): string {
-  const key = body.indexOf(ANSWER_KEY);
-  if (key === -1) return "";
-
-  const open = body.indexOf('"', key + ANSWER_KEY.length);
+  const open = valueStart(body, ANSWER_KEY, '"');
   if (open === -1) return "";
 
   let out = "";
