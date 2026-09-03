@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import type { AnswerInput, AnswerResult } from "@/server/ai/types";
 import { askQuestion, type AskDependencies } from "@/server/rag/answer";
 import type { RetrievedChunk } from "@/server/rag/retrieve";
+import type { Reservation } from "@/server/spend";
 
 const chunk = (n: number, content: string): RetrievedChunk => ({
   id: `chunk-${n}`,
@@ -33,7 +34,8 @@ const deps = (
   model: { answer: AskDependencies["answer"] },
 ): AskDependencies => ({
   retrieve: async () => chunks,
-  recordSpend: async () => {},
+  reserveCall: async () => ({ allowed: true }),
+  recordTokens: async () => {},
   answer: model.answer,
 });
 
@@ -119,6 +121,95 @@ describe("askQuestion", () => {
       "no_relevant_chunks",
     );
     assert.equal(model.calls.length, 0, "no chunks, no reason to pay for a call");
+  });
+
+  /**
+   * The two daily ceilings, as the ask flow meets them.
+   *
+   * The reservation itself is SQL and gets no unit test — see README gap 29.
+   * What IS testable here, because the dependency is injected, is the
+   * orchestration around it: that a refused reservation never reaches a
+   * provider, that the scope survives to the route which has to name the right
+   * ceiling, and that the retry is charged as the second real call it is.
+   */
+  describe("the daily ceilings", () => {
+    it("makes no model call when the reservation is refused", async () => {
+      const model = stubModel({ answer: "750 W.", citations: [1] });
+      const result = await askQuestion("alice", "q?", {
+        ...deps(sources, model),
+        reserveCall: async () => ({
+          allowed: false,
+          scope: "deployment",
+          retryAfterSeconds: 3_600,
+        }),
+      });
+
+      assert.equal(result.status, "budget_exhausted");
+      assert.equal(model.calls.length, 0, "a refused call must not be made");
+    });
+
+    it("carries the scope out, so the route can name the right ceiling", async () => {
+      const model = stubModel({ answer: "750 W.", citations: [1] });
+      const result = await askQuestion("alice", "q?", {
+        ...deps(sources, model),
+        reserveCall: async () => ({
+          allowed: false,
+          scope: "user",
+          retryAfterSeconds: 60,
+        }),
+      });
+
+      assert.equal(result.status === "budget_exhausted" && result.scope, "user");
+      assert.equal(
+        result.status === "budget_exhausted" && result.retryAfterSeconds,
+        60,
+      );
+    });
+
+    it("charges the retry separately, and stops when it cannot", async () => {
+      // The first attempt is funded and rejected by the citation guard. The
+      // second has no budget, so the question ends where that rejection had
+      // already left it.
+      let reservations = 0;
+      const model = stubModel({ answer: "Wrong.", citations: [99] });
+      const result = await askQuestion("alice", "q?", {
+        ...deps(sources, model),
+        // Annotated because a ternary between the two arms of a discriminated
+        // union widens `allowed` to `boolean` without it.
+        reserveCall: async (): Promise<Reservation> => {
+          reservations += 1;
+          return reservations === 1
+            ? { allowed: true }
+            : { allowed: false, scope: "user", retryAfterSeconds: 60 };
+        },
+      });
+
+      assert.equal(reservations, 2, "the retry is a second real call");
+      assert.equal(model.calls.length, 1, "and it was never funded");
+      assert.equal(result.status, "not_found");
+      assert.equal(
+        result.status === "not_found" && result.reason,
+        "citations_rejected",
+      );
+    });
+
+    it("records what each completed call cost", async () => {
+      const charged: Array<[number, number]> = [];
+      const model = stubModel({ answer: "Wrong.", citations: [99] });
+
+      await askQuestion("alice", "q?", {
+        ...deps(sources, model),
+        recordTokens: async (_sub, input, output) => {
+          charged.push([input, output]);
+        },
+      });
+
+      // Two attempts, two costs. The stub reports 1 in and 1 out per call.
+      assert.deepEqual(charged, [
+        [1, 1],
+        [1, 1],
+      ]);
+    });
   });
 
   describe("anonymization round trip", () => {

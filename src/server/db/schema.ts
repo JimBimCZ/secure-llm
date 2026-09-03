@@ -212,3 +212,31 @@ export const userSpend = pgTable(
 );
 
 export type UserSpend = typeof userSpend.$inferSelect;
+
+/**
+ * How much the WHOLE DEPLOYMENT has spent in the window in force.
+ *
+ * `user_spend` above answers "may this person ask another question". This
+ * answers "may anyone", which is the number an operator holding a monthly
+ * budget actually has.
+ *
+ * It holds NO subject, and that is a shape rather than a policy: there is
+ * nowhere to record who spent it. That is the same control `llm_calls` uses,
+ * and it is why `deleteAccount` has nothing to remove here.
+ *
+ * The obvious alternative — SUM(calls) over `user_spend` — was rejected twice
+ * over. An aggregate cannot be atomically checked and incremented, which is
+ * the whole mechanism in server/spend.ts; and `deleteAccount` deletes a user's
+ * `user_spend` rows, so leaving would refund the deployment's budget.
+ */
+export const deploymentSpend = pgTable("deployment_spend", {
+  /** Start of the UTC day — the same window `user_spend` uses. */
+  windowStart: timestamp("window_start", { withTimezone: true })
+    .primaryKey()
+    .notNull(),
+  calls: integer("calls").notNull().default(0),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+});
+
+export type DeploymentSpend = typeof deploymentSpend.$inferSelect;

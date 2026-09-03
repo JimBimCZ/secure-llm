@@ -72,6 +72,17 @@ const envSchema = z.object({
   // a capped answer out — so a ceiling on calls is a ceiling on money, and it
   // is a number a user who hits it can understand. 0 disables it.
   ASK_DAILY_CALL_LIMIT: z.coerce.number().int().min(0).default(200),
+  // Model calls the WHOLE DEPLOYMENT may make per UTC day, across every user.
+  // The limit above bounds one person; this bounds the bill, which is what an
+  // operator with a monthly budget actually holds.
+  //
+  // The default is 0 — DISABLED — and the asymmetry with its sibling is the
+  // argument for it. 200 questions per person per day is a personal-scale
+  // figure this app can reason about. A deployment total depends on how many
+  // people the deployment serves, which this app cannot know, so any non-zero
+  // default would be a ceiling the app invented on an operator's behalf and
+  // then enforced against them.
+  ASK_DAILY_CALL_LIMIT_TOTAL: z.coerce.number().int().min(0).default(0),
 
   // --- Retention ------------------------------------------------------
   // How long an LLM audit record (model, time, tokens, latency, outcome) is
@@ -122,6 +133,7 @@ const BUILD_PHASE_PLACEHOLDERS: Env = {
   RAG_MIN_SCORE: 0.25,
   ASK_RATE_LIMIT_PER_MINUTE: 20,
   ASK_DAILY_CALL_LIMIT: 200,
+  ASK_DAILY_CALL_LIMIT_TOTAL: 0,
   RETENTION_AUDIT_DAYS: 30,
 };
 

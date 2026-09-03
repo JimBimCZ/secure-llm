@@ -5,7 +5,12 @@ import { logger } from "@/server/log/logger";
 import { createAnonymizer, type RedactionCounts } from "@/server/privacy/anonymizer";
 import { resolveCitations, type Citation } from "@/server/rag/citations";
 import { retrieveChunks, type RetrievedChunk } from "@/server/rag/retrieve";
-import { recordSpend } from "@/server/spend";
+import {
+  recordTokens,
+  reserveCall,
+  type Reservation,
+  type SpendScope,
+} from "@/server/spend";
 
 export type { Citation };
 
@@ -24,13 +29,23 @@ export type AskResult =
       privacy: Privacy;
     }
   /** The honest outcome. `reason` is for the log and the UI's explanation. */
-  | { status: "not_found"; reason: "no_relevant_chunks" | "citations_rejected" };
+  | { status: "not_found"; reason: "no_relevant_chunks" | "citations_rejected" }
+  /**
+   * A ceiling had no room for the call. Distinct from `not_found` because
+   * nothing was searched and found wanting — the question was never asked.
+   * `scope` decides which of the two ceilings the user is told about.
+   */
+  | {
+      status: "budget_exhausted";
+      scope: SpendScope;
+      retryAfterSeconds: number;
+    };
 
 /** The text shown for every not_found outcome. One sentence, no hedging. */
 export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
 
 /**
- * The three things this function reaches outside itself for.
+ * The four things this function reaches outside itself for.
  *
  * Defaulted, so every call site passes a question and nothing else and no
  * wiring exists to get wrong. Named, so a test can drive the orchestration
@@ -39,17 +54,23 @@ export const NOT_FOUND_MESSAGE = "Not found in your knowledge base.";
  * when a model cites a source it was not given, and no provider in this
  * repository does that: the mock cites what it extracted, and asking a real
  * model to misbehave on demand is not a test, it is a hope. A stub that always
- * cites [99] reaches it in one line.
+ * cites [99] reaches it in one line. The same reason splits spending in two:
+ * `reserveCall` lets a test drive the ceiling without a connection, and
+ * `recordTokens` lets it assert what a completed call was charged, separately
+ * from whether it was allowed to happen at all.
  *
- * A default parameter, not a container. There are three of them.
+ * A default parameter, not a container. There are four of them.
  */
 export interface AskDependencies {
   retrieve: (ownerSub: string, question: string) => Promise<RetrievedChunk[]>;
   /** The audited, timed-out call from ai/call.ts — the one door out. */
   answer: (input: AnswerInput) => Promise<AnswerResult>;
-  /** Adds one call to the asker's daily counter. Injected so the tests, which
-   *  may not open a connection, do not reach a database to count one. */
-  recordSpend: (
+  /** Reserves one model call against both daily ceilings, atomically. THE
+   *  control — the route's pre-check is only an early exit. Injected so the
+   *  tests, which may not open a connection, do not reach a database. */
+  reserveCall: (ownerSub: string) => Promise<Reservation>;
+  /** Adds what a completed call cost. Best-effort; never fails a question. */
+  recordTokens: (
     ownerSub: string,
     inputTokens: number,
     outputTokens: number,
@@ -59,7 +80,8 @@ export interface AskDependencies {
 const LIVE: AskDependencies = {
   retrieve: retrieveChunks,
   answer: (input) => answerWithAudit(getLlmProvider(), input),
-  recordSpend,
+  reserveCall,
+  recordTokens,
 };
 
 /**
@@ -119,15 +141,45 @@ export async function askQuestion(
   };
 
   for (const retry of [false, true]) {
+    // Reserved BEFORE the call, not counted after it: the reservation IS the
+    // check, so nothing can slip between reading a count and writing it. The
+    // retry below is a second real call, so it reserves again.
+    const reservation = await deps.reserveCall(ownerSub);
+
+    if (!reservation.allowed) {
+      if (retry) {
+        // The first attempt was rejected by the citation guard and there is no
+        // budget for a second. Fall through to the refusal that attempt had
+        // already earned — but say so first, because an unfunded retry that
+        // vanished from the log is the one budget event nobody could see.
+        logger.warn(
+          { sub: ownerSub, scope: reservation.scope, outcome: "retry_unfunded" },
+          "ask",
+        );
+        break;
+      }
+
+      logger.warn(
+        {
+          sub: ownerSub,
+          scope: reservation.scope,
+          outcome: "budget_exhausted",
+        },
+        "ask",
+      );
+
+      return {
+        status: "budget_exhausted",
+        scope: reservation.scope,
+        retryAfterSeconds: reservation.retryAfterSeconds,
+      };
+    }
+
     const result = await deps.answer({ ...input, retry });
 
-    // Counted here rather than in ai/call.ts, which is the one door out and is
-    // deliberately subject-free: threading a `sub` through it so it can bill
-    // someone would put identity into the one component designed not to hold
-    // any. This is the innermost place that knows both who asked and that a
-    // call was actually made — and the retry below is a second real call, so
-    // it is counted separately.
-    await deps.recordSpend(
+    // The call was charged above, before it was made. Only its cost is known
+    // now, and only now can it be recorded.
+    await deps.recordTokens(
       ownerSub,
       result.usage.inputTokens,
       result.usage.outputTokens,
