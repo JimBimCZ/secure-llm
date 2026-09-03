@@ -728,9 +728,11 @@ seam**: one `PersonDetector` interface, two implementations, selected by
   running in-process in the container, baked into the image, never reaching the network. It
   keeps the name dictionary too: a name someone has already told the app about is a certainty,
   not a guess. The model is what replaced the guessing.
-- **`heuristic`** — the detector this project shipped with, moved across without behavioural
-  change: the same dictionary, plus a capitalised-bigram guess and a sentence-starter list. No
-  model. It is what the tests use and what a model-free build gets.
+- **`heuristic`** — the detector this project shipped with, with one behavioural change,
+  documented in `heuristic.ts`: both passes now run over the same original text, so an unlisted
+  first name beside a known surname is redacted whole. Otherwise the same dictionary, plus a
+  capitalised-bigram guess and a sentence-starter list. No model. It is what the tests use and
+  what a build without the NER weights must be configured to use.
 
 Measured against the full seed corpus, through the app's own detector:
 
@@ -765,21 +767,27 @@ direction. A naive detector whose limits are written down still beats a black bo
 are not, and that argument is why `heuristic` remains a supported configuration rather than
 deleted code. It is simply no longer what the app does by default.
 
-**What the model costs**, measured against the running stack:
+**What the model costs**, measured:
 
 - **Model payload: 132 MB.** `.models` in the image holds **155 MB** — 23 MB of embedder,
-  unchanged, and 132 MB of NER model. The whole image is **496 MB**. The entire increase is the
-  multilingual vocabulary that makes the Czech names work.
-- **Startup: one model load, measured at 2,902 ms**, logged with the model id and the load
-  time, against a 40 s healthcheck start period. It is loaded eagerly, after migrations, so a
-  missing or misnamed model stops the deployment instead of failing every question. The claim
-  is deliberately narrow: a detector that cannot load throws, and `redact` throwing means no
-  text leaves the process, so eager loading prevents no leak. It changes *who finds out* — the
-  healthcheck, or a user.
+  unchanged, and 132 MB of NER model. The whole image is **496 MB**. By parameter count,
+  roughly three quarters of the increase is the multilingual vocabulary that makes the Czech
+  names work; the rest is the wider encoder, 768 dimensions against MiniLM's 384.
+- **Startup: the model loads eagerly, after migrations,** logged with the model id and the load
+  time (measured at 2,902 ms), against a 40 s healthcheck start period, so a missing or
+  misnamed model stops the deployment instead of failing every question. **It loads twice, not
+  once** (gap 35): the warm-up at startup and the first question's own call to
+  `getPersonDetector()` land in different Next.js server entries that do not share `ner.ts`'s
+  module-level cache, so the first question pays the full load cost again. The narrower claim
+  still holds: a detector that cannot load throws, and `redact` throwing means no text leaves
+  the process, so eager loading prevents no leak — it changes *who finds out*, the healthcheck
+  or a user — but "one model load" is not what this build does.
 - **Per question: this app does not measure it, and does not claim a number.** The audit log
   times the LLM call, not detection, and no field anywhere isolates the detector's share of a
   request. What was measured is the corpus level: the whole seed corpus takes **7,896 ms**
-  through `ner`, including one cold model load, against **8 ms** through `heuristic`. Detection
+  through `ner`, including one cold model load, against **8 ms** through `heuristic` — measured
+  in the builder-stage image (`docker build --target builder`), where the real source and the
+  baked model are both in the path, not in the running container. Detection
   is real in-process work now rather than approximately free, and how much of one question's
   wall clock it accounts for is not something this build reports.
 
@@ -1345,8 +1353,10 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     what the requirement asks for. Addresses, dates of birth, national ID and account numbers
     remain undetected, exactly as the detector section's known limits already say.
 33. **The image grew by 132 MB** — `.models` went from 23 MB to 155 MB, and the whole image is
-    496 MB. The entire increase is the multilingual vocabulary that makes the Czech names work.
-    A single-language model would be a fraction of it and would not do this job.
+    496 MB. By parameter count, roughly three quarters of the increase is the multilingual
+    vocabulary that makes the Czech names work; the rest is the wider encoder. A single-language
+    model such as `distilbert-base-cased` (same 768/6/3072 shape, ~65M parameters) would be
+    roughly half the size and would not do this job.
 34. **No automated test covers the model call itself.** `windows` and `personsIn` — the
     windowing that prevents silent truncation, and the wordpiece stitching — are pure functions
     in this project's own source and are tested. The pipeline they feed is not: the suite loads
@@ -1356,6 +1366,16 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     same shape: a measured pass against the running stack, recorded in the detector section
     above. The residual risk is plain — a future change to the model, the dtype or the
     stitching can degrade detection, and only another manual pass would catch it.
+35. **The eager warm-up does not warm the instance the request path uses, so the model loads
+    twice, not once.** `instrumentation.node.ts` calls `getPersonDetector().warmUp()` at
+    startup; `rag/answer.ts` calls `getPersonDetector()` again from the request path. Next.js
+    compiles `instrumentation` as a server entry distinct from the route-handler chunks, and the
+    module-level cache in `ner.ts` is not shared between them, so each holds its own model
+    instance. Measured against the running stack: the startup log shows one load, then the
+    first question after startup triggers a second, separately logged, load. The narrower
+    safety claim survives — a detector that cannot load throws at startup and stops the
+    deployment before any question reaches it — but the cost claim does not: the first question
+    still pays the full load cost again, on top of the one startup already paid.
 
 ## What I would build next
 

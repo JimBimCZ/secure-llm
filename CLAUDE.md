@@ -123,7 +123,7 @@ src/
       embedders/        # local.ts | mock.ts                          (embedding)
       index.ts          # factories driven by LLM_PROVIDER / EMBEDDING_PROVIDER
     privacy/anonymizer.ts
-    privacy/detectors/   # types.ts | dictionary.ts | heuristic.ts | ner.ts   (person names)
+    privacy/detectors/   # types.ts | dictionary.ts | heuristic.ts | ner.ts | index.ts   (person names)
     rag/                # chunk.ts, embed.ts, retrieve.ts, answer.ts
     db/                 # schema.ts, migrations/
     log/                # logger.ts, llmAudit.ts

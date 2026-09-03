@@ -11,9 +11,10 @@ import type { PersonDetector } from "@/server/privacy/detectors/types";
  * contribution is the false positives alone.
  *
  * It is kept, and it is not dead code: it is what the tests use, because they
- * load no model, and it is what a build without the NER weights runs. Its
- * over-redaction was always the safe direction — a redacted `Arrow Lake` is
- * restored before the user sees it — so keeping it costs nothing.
+ * load no model, and it is what a build without the NER weights must be
+ * configured to use. Its over-redaction was always the safe direction — a
+ * redacted `Arrow Lake` is restored before the user sees it — so keeping it
+ * costs nothing.
  *
  * BEHAVIOURAL DIVERGENCE from the pre-seam anonymizer: the old code ran the
  * dictionary over the whole text, then ran the bigram only over what the

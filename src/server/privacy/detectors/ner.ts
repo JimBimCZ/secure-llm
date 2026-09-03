@@ -96,7 +96,12 @@ export function personsIn(tokens: TaggedToken[], window: string): string[] {
   const flush = () => {
     // A stitched form the window does not contain is a reconstruction that
     // went wrong. The anonymizer would not find it either, so dropping it here
-    // keeps that fact local instead of passing a phantom name outward.
+    // keeps that fact local instead of passing a phantom name outward. The
+    // trim() check is the "##"-only-token defence: a continuation wordpiece
+    // that carries no characters after the "##" marker (current starts as
+    // null, so the first such token stitches to an empty string), and an
+    // empty string is contained in every window, so window.includes alone
+    // would push it through as a phantom name.
     if (current !== null && current.trim().length > 0 && window.includes(current)) found.push(current);
     current = null;
   };
