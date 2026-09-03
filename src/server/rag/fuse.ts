@@ -1,5 +1,5 @@
 /**
- * Combining the two retrieval arms into one ranked list.
+ * Combining the retrieval arms into one ranked list.
  *
  * The arms score in units that cannot be compared. The vector arm produces a
  * cosine similarity in [0, 1]; the lexical arm produces a text rank that is
@@ -28,43 +28,47 @@
  */
 const K = 60;
 
-/** Which arm (or arms) put a chunk in the result. Recorded, not acted on. */
-export type MatchedBy = "vector" | "lexical" | "both";
+/** Which arm found a chunk. Recorded, not acted on. */
+export type Arm = "vector" | "lexical" | "prose";
+
+/** One arm's ranked output, best first. */
+export interface ArmResult<T> {
+  arm: Arm;
+  rows: T[];
+}
 
 /**
- * Merge two ranked lists into one, best first.
+ * Merge ranked lists into one, best first.
  *
- * With an empty lexical list this returns the vector list unchanged: a single
- * arm's contribution 1/(K + rank) falls monotonically with rank, so the order
- * it arrived in is the order it leaves in.
+ * Arms are independent: each arrives already filtered in SQL by its own
+ * admission rule, so there is no relevance decision left to take here. With one
+ * non-empty arm this returns that arm's list unchanged, because a single arm's
+ * contribution 1/(K + rank) falls monotonically with rank.
+ *
+ * Ties break towards the arm given first — `Map` preserves insertion order and
+ * `Array.prototype.sort` is stable — so callers pass the vector arm first and
+ * semantic similarity stays the default.
  */
 export function fuseByRank<T extends { id: string }>(
-  vector: T[],
-  lexical: T[],
+  arms: Array<ArmResult<T>>,
   limit: number,
-): Array<T & { matchedBy: MatchedBy }> {
-  const fused = new Map<string, { row: T; score: number; matchedBy: MatchedBy }>();
+): Array<T & { matchedBy: Arm[] }> {
+  const fused = new Map<string, { row: T; score: number; matchedBy: Arm[] }>();
 
-  const absorb = (rows: T[], arm: "vector" | "lexical") => {
+  for (const { arm, rows } of arms) {
     rows.forEach((row, index) => {
       const contribution = 1 / (K + index + 1);
       const seen = fused.get(row.id);
 
       if (seen) {
         seen.score += contribution;
-        seen.matchedBy = "both";
+        seen.matchedBy.push(arm);
         return;
       }
 
-      fused.set(row.id, { row, score: contribution, matchedBy: arm });
+      fused.set(row.id, { row, score: contribution, matchedBy: [arm] });
     });
-  };
-
-  // The vector arm goes first so that ties break towards it. Ties happen when
-  // both arms return a chunk at the same rank and neither found the other's,
-  // and preferring semantic similarity is the safer default.
-  absorb(vector, "vector");
-  absorb(lexical, "lexical");
+  }
 
   return [...fused.values()]
     .sort((a, b) => b.score - a.score)

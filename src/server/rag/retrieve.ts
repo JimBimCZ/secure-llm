@@ -4,7 +4,7 @@ import { getEmbedder } from "@/server/ai";
 import { db } from "@/server/db";
 import { chunks, documents } from "@/server/db/schema";
 import { env } from "@/server/env";
-import { fuseByRank, type MatchedBy } from "@/server/rag/fuse";
+import { type Arm, fuseByRank } from "@/server/rag/fuse";
 import { distinctiveTerms } from "@/server/rag/tokens";
 
 export interface RetrievedChunk {
@@ -15,8 +15,8 @@ export interface RetrievedChunk {
   content: string;
   /** Cosine similarity in [0, 1]. Both embedders return unit vectors. */
   score: number;
-  /** Which arm found it. Recorded for the log; nothing branches on it. */
-  matchedBy: MatchedBy;
+  /** Which arms found it. Recorded for the log; nothing branches on it. */
+  matchedBy: Arm[];
 }
 
 /** A row as it comes back from either arm, before fusion labels it. */
@@ -125,5 +125,11 @@ export async function retrieveChunks(
 
   const [vectorHits, lexicalHits] = await Promise.all([byVector, byTokens]);
 
-  return fuseByRank(vectorHits, lexicalHits, env.RAG_TOP_K);
+  return fuseByRank(
+    [
+      { arm: "vector", rows: vectorHits },
+      { arm: "lexical", rows: lexicalHits },
+    ],
+    env.RAG_TOP_K,
+  );
 }

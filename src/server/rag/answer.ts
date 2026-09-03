@@ -142,9 +142,11 @@ export async function askQuestion(
           outcome: "answered",
           retried: retry,
           chunksRetrieved: retrieved.length,
-          // How many chunks the exact-token arm contributed. Worth a number in
-          // the log: it is the only way to see hybrid retrieval doing anything.
-          lexicalHits: retrieved.filter((c) => c.matchedBy !== "vector").length,
+          // How many chunks the lexical arms contributed. Worth a number in the
+          // log: it is the only way to see hybrid retrieval doing anything.
+          lexicalHits: retrieved.filter((c) =>
+            c.matchedBy.some((arm) => arm !== "vector"),
+          ).length,
           citationCount: citations.length,
           topScore: Number(retrieved[0]!.score.toFixed(3)),
           redacted: privacy.replaced,
