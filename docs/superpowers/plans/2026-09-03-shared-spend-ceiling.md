@@ -282,8 +282,16 @@ export type Reservation = { allowed: true } | SpendRefusal;
  * Private: nothing beyond this module should catch it.
  */
 class Refused extends Error {
-  constructor(readonly scope: SpendScope) {
+  readonly scope: SpendScope;
+
+  // An explicit field and assignment rather than a parameter property
+  // (`constructor(readonly scope: …)`). Node's type stripping ERASES types, it
+  // does not compile them, and a parameter property emits a runtime assignment
+  // that erasure cannot produce — so it is rejected outright with
+  // ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX and the whole suite fails to load.
+  constructor(scope: SpendScope) {
     super(`daily ${scope} limit reached`);
+    this.scope = scope;
   }
 }
 ```
@@ -545,7 +553,9 @@ export async function recordTokens(
 
 Run: `npm run typecheck`
 
-Expected: errors ONLY in `src/server/rag/answer.ts` (it still imports the deleted `recordSpend`) and `src/app/api/ask/route.ts` (it reads `budget.retryAfterSeconds` off a type that is now a union). Task 3 fixes both. Any error inside `src/server/spend.ts` itself must be fixed now.
+Expected: errors ONLY in `src/server/rag/answer.ts`, which still imports the deleted `recordSpend`. Task 3 fixes it. Any error inside `src/server/spend.ts` itself must be fixed now.
+
+`src/app/api/ask/route.ts` does **not** error, even though `checkDailySpend`'s return type changed to a union: `if (!budget.allowed)` narrows it to `SpendRefusal`, which still carries `retryAfterSeconds`. It compiles and shows the wrong message until Task 3, which is that task's actual work rather than a compile error to chase.
 
 If `setWhere` is rejected by drizzle-orm 0.45.2's types, fall back to `db.execute(sql\`…\`)` for the two upserts — `src/server/rag/bm25.ts` already does that for the same reason. The SQL is what ships either way.
 
