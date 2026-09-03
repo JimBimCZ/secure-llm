@@ -30,6 +30,22 @@ export interface AnswerResult {
   usage: { inputTokens: number; outputTokens: number };
 }
 
+/**
+ * One event from a provider that can answer incrementally.
+ *
+ * `citations` comes FIRST, which is the whole point: the guard in
+ * rag/answer.ts can then run before a word of prose is shown, so an answer
+ * that cites nothing valid is refused without the user having read it. The
+ * prompt asks the model for that field order and `ai/partialJson.ts` reads it
+ * out of the response as it arrives.
+ *
+ * `usage` arrives last, because token counts are only final when the call is.
+ */
+export type AnswerStreamEvent =
+  | { type: "citations"; citations: number[] }
+  | { type: "delta"; text: string }
+  | { type: "usage"; inputTokens: number; outputTokens: number };
+
 export interface LlmProvider {
   readonly name: string;
   /**
@@ -48,6 +64,17 @@ export interface LlmProvider {
    * against a timer keeps running, and keeps costing, after we stop waiting.
    */
   answer(input: AnswerInput, signal: AbortSignal): Promise<AnswerResult>;
+  /**
+   * Optional, and absence is not a defect: a provider without this is called
+   * through `answer` and its whole reply is emitted as one delta, so nothing
+   * above `providers/` has a second code path. Implemented where it has been
+   * exercised against a live service — see README gaps 1 and 2 for why that
+   * excludes the vendor and the gateway stub.
+   */
+  answerStream?(
+    input: AnswerInput,
+    signal: AbortSignal,
+  ): AsyncIterable<AnswerStreamEvent>;
 }
 
 export interface EmbeddingProvider {

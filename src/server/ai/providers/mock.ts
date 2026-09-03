@@ -1,5 +1,10 @@
 import { significantTerms } from "@/server/ai/lexical";
-import type { AnswerInput, AnswerResult, LlmProvider } from "@/server/ai/types";
+import type {
+  AnswerInput,
+  AnswerResult,
+  AnswerStreamEvent,
+  LlmProvider,
+} from "@/server/ai/types";
 
 /**
  * Answers with no network, no key and no model — the default, and therefore the
@@ -61,64 +66,95 @@ function sentences(text: string): string[] {
     .filter((s) => s.length > 30);
 }
 
+/** The whole answer, computed once. Both entry points below use it. */
+function extract(input: AnswerInput): AnswerResult {
+  const asked = new Set(significantTerms(input.question).keys());
+
+  const candidates: Candidate[] = [];
+  // Chunks overlap by ~100 tokens by design, so the same sentence reaches
+  // us more than once. Keeping the first occurrence keeps the citation
+  // pointing at the higher-ranked chunk.
+  const seenSentences = new Set<string>();
+
+  input.chunks.forEach((chunk, i) => {
+    for (const sentence of sentences(chunk.content)) {
+      if (seenSentences.has(sentence)) continue;
+      seenSentences.add(sentence);
+
+      const terms = significantTerms(sentence);
+      let shared = 0;
+      for (const term of terms.keys()) if (asked.has(term)) shared += 1;
+
+      // Divide by length so a long paragraph does not win on volume alone.
+      if (shared >= MIN_SHARED_TERMS) {
+        candidates.push({
+          sentence,
+          citation: i + 1,
+          score: shared / Math.sqrt(terms.size || 1),
+        });
+      }
+    }
+  });
+
+  // Retrieval already ranked the chunks, so falling back to the opening of
+  // the best one is better than returning nothing when no sentence shares
+  // vocabulary with the question.
+  if (candidates.length === 0) {
+    const best = input.chunks[0];
+    if (!best) return { answer: "", citations: [], usage: usageOf("") };
+
+    const opening = sentences(best.content).slice(0, MAX_SENTENCES).join(" ");
+    return {
+      answer: opening,
+      citations: [1],
+      usage: usageOf(input.question + opening),
+    };
+  }
+
+  const chosen = candidates
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_SENTENCES);
+
+  const answer = chosen.map((c) => c.sentence).join(" ");
+  // Cite each source once, in the order the sentences appear in the answer.
+  const citations = [...new Set(chosen.map((c) => c.citation))];
+
+  return { answer, citations, usage: usageOf(input.question + answer) };
+}
+
 export function createMockLlmProvider(): LlmProvider {
   return {
     name: "mock",
     model: "mock-extractive-v1",
 
     async answer(input: AnswerInput): Promise<AnswerResult> {
-      const asked = new Set(significantTerms(input.question).keys());
+      return extract(input);
+    },
 
-      const candidates: Candidate[] = [];
-      // Chunks overlap by ~100 tokens by design, so the same sentence reaches
-      // us more than once. Keeping the first occurrence keeps the citation
-      // pointing at the higher-ranked chunk.
-      const seenSentences = new Set<string>();
+    async *answerStream(input: AnswerInput): AsyncGenerator<AnswerStreamEvent> {
+      const result = extract(input);
 
-      input.chunks.forEach((chunk, i) => {
-        for (const sentence of sentences(chunk.content)) {
-          if (seenSentences.has(sentence)) continue;
-          seenSentences.add(sentence);
+      yield { type: "citations", citations: result.citations };
 
-          const terms = significantTerms(sentence);
-          let shared = 0;
-          for (const term of terms.keys()) if (asked.has(term)) shared += 1;
-
-          // Divide by length so a long paragraph does not win on volume alone.
-          if (shared >= MIN_SHARED_TERMS) {
-            candidates.push({
-              sentence,
-              citation: i + 1,
-              score: shared / Math.sqrt(terms.size || 1),
-            });
-          }
-        }
-      });
-
-      // Retrieval already ranked the chunks, so falling back to the opening of
-      // the best one is better than returning nothing when no sentence shares
-      // vocabulary with the question.
-      if (candidates.length === 0) {
-        const best = input.chunks[0];
-        if (!best) return { answer: "", citations: [], usage: usageOf("") };
-
-        const opening = sentences(best.content).slice(0, MAX_SENTENCES).join(" ");
-        return {
-          answer: opening,
-          citations: [1],
-          usage: usageOf(input.question + opening),
-        };
+      // Sentence at a time, which is the granularity this provider has: it
+      // extracts whole sentences, so anything finer would be a pretence at
+      // generation. No artificial delay either — a mock that fakes latency to
+      // look good in a demo is a lie in the one provider that exists to be
+      // honest and deterministic.
+      // Splits AFTER the whitespace following a sentence end, so every
+      // character lands in exactly one delta and the joined deltas equal
+      // `result.answer` byte for byte. The test asserts that: a streaming path
+      // that quietly drops a space between sentences shows a different answer
+      // than the one the guard approved.
+      for (const piece of result.answer.split(/(?<=[.!?]\s)/)) {
+        if (piece.length > 0) yield { type: "delta", text: piece };
       }
 
-      const chosen = candidates
-        .sort((a, b) => b.score - a.score)
-        .slice(0, MAX_SENTENCES);
-
-      const answer = chosen.map((c) => c.sentence).join(" ");
-      // Cite each source once, in the order the sentences appear in the answer.
-      const citations = [...new Set(chosen.map((c) => c.citation))];
-
-      return { answer, citations, usage: usageOf(input.question + answer) };
+      yield {
+        type: "usage",
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+      };
     },
   };
 }
