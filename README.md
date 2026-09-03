@@ -774,14 +774,23 @@ deleted code. It is simply no longer what the app does by default.
   roughly three quarters of the increase is the multilingual vocabulary that makes the Czech
   names work; the rest is the wider encoder, 768 dimensions against MiniLM's 384.
 - **Startup: the model loads eagerly, after migrations,** logged with the model id and the load
-  time (measured at 2,902 ms), against a 40 s healthcheck start period, so a missing or
-  misnamed model stops the deployment instead of failing every question. **It loads twice, not
-  once** (gap 35): the warm-up at startup and the first question's own call to
-  `getPersonDetector()` land in different Next.js server entries that do not share `ner.ts`'s
-  module-level cache, so the first question pays the full load cost again. The narrower claim
-  still holds: a detector that cannot load throws, and `redact` throwing means no text leaves
-  the process, so eager loading prevents no leak — it changes *who finds out*, the healthcheck
-  or a user — but "one model load" is not what this build does.
+  time, against a 40 s healthcheck start period, so a missing or misnamed model stops the
+  deployment instead of failing every question. **It loads once, and that took fixing** — the
+  build this section first described loaded it twice (gap 35), because the warm-up at startup
+  and the first question's own call to `getPersonDetector()` land in different Next.js server
+  entries, and a module-level `let` is per entry rather than per process. `ner.ts` now caches
+  the loaded tagger on `globalThis`, which is genuinely per-process, and the two entries share
+  one load. Measured against the running stack, one question asked after startup:
+
+  | | detector loads in one process | first question |
+  | --- | --- | --- |
+  | Before | **2** — 898 ms at startup, then 664 ms on the first question | pays the full load again |
+  | After | **1** — 865 ms at startup | no load |
+
+  The eager warm-up's own claim was always the narrower one and is untouched: a detector that
+  cannot load throws, and `redact` throwing means no text leaves the process, so eager loading
+  prevents no leak — it changes *who finds out*, the healthcheck or a user. What changed is
+  that "one model load" is now what this build actually does.
 - **Per question: this app does not measure it, and does not claim a number.** The audit log
   times the LLM call, not detection, and no field anywhere isolates the detector's share of a
   request. What was measured is the corpus level: the whole seed corpus takes **7,896 ms**
@@ -1366,21 +1375,46 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     same shape: a measured pass against the running stack, recorded in the detector section
     above. The residual risk is plain — a future change to the model, the dtype or the
     stitching can degrade detection, and only another manual pass would catch it.
-35. **The eager warm-up does not warm the instance the request path uses, so the model loads
-    twice, not once.** `instrumentation.node.ts` calls `getPersonDetector().warmUp()` at
-    startup; `rag/answer.ts` calls `getPersonDetector()` again from the request path. Next.js
-    compiles `instrumentation` as a server entry distinct from the route-handler chunks, and the
-    module-level cache in `ner.ts` is not shared between them, so each holds its own model
-    instance. Measured against the running stack: the startup log shows one load, then the
-    first question after startup triggers a second, separately logged, load. The narrower
-    safety claim survives — a detector that cannot load throws at startup and stops the
-    deployment before any question reaches it — but the cost claim does not, and it is paid
-    twice over. In time: the first question still pays the full load again, on top of the one
-    startup already paid. In memory: the process holds **two** resident copies of a 132 MB
-    model rather than one, for the life of the container. Closing it means keying the cache on
-    `globalThis` instead of on the module, which is what makes a singleton survive Next.js
-    handing the same file to two entries — a small change, and one this project has not
-    measured, so it is written down here rather than made on the strength of an argument.
+35. **~~The eager warm-up does not warm the instance the request path uses, so the model loads
+    twice, not once~~ — closed, by the small change the gap itself named.** `ner.ts` caches the
+    loaded tagger on `globalThis` rather than in a module-level `let`, because a module-level
+    cache is per Next.js server entry and `globalThis` is per process. Measured against the
+    running stack, one question asked after startup: **2 loads before** (898 ms at startup, then
+    664 ms on the first question) and **1 after** (865 ms at startup, and the first question
+    loads nothing). Re-measured across a container restart, the count is one load per process,
+    with a question served in each.
+    The gap said this was "written down here rather than made on the strength of an argument",
+    and the argument turned out to be right — but two things about it were worth checking rather
+    than assuming, and the build output was what checked them. The compiled server chunks put
+    this loader in exactly two graphs, one reached from `instrumentation` and one from
+    `app/api/ask/route`, which is the mechanism stated as fact above being confirmed rather than
+    inferred from the log count. And a count of 1 *after* the fix is also what rules out the
+    other explanation available for a count of 2: had the container run more than one Node
+    worker, `instrumentation` would run per worker and `globalThis` would be per worker too, so
+    the fix would have changed nothing. It changed it to one.
+    On memory the honest report is narrower than the gap's own prediction. The gap claimed two
+    resident copies of a 132 MB model, which follows from the code — a load allocates a session
+    that is never freed — but RSS is too noisy an instrument to confirm the size of that
+    difference: the two runs' startup baselines (540 MiB before, 385 MiB after) differ by more
+    than one model, which no one-copy story explains. What *is* interpretable is each run
+    against itself. Before, asking the first question moved RSS from 540 MiB to 641 MiB; after,
+    from 385 MiB to 380 MiB. A step on the first question, then no step. The controlling
+    evidence for this gap is the load count, not the RSS delta.
+
+36. **The embedder has the same trap, latent rather than live.** `local.ts` caches its pipeline
+    in a module-level `let`, exactly the shape gap 35 was, and the built output puts that loader
+    in three server graphs: the chunk shared by `/api/ask`, `/api/documents` and
+    `/api/documents/reembed`; a second reached from `/api/admin/stats`; and the SSR chunk behind
+    the page component. It nevertheless loads **once**, measured in both passes above, and the
+    reason is not that the cache is sound — it is that only the first of those three ever calls
+    `embed()`. `/api/admin/stats` and `embedding-notice.tsx` reach `getEmbedder()` only to read
+    `embedder.model`, a plain string, which loads no model. So the duplication is real and
+    currently costs nothing, and what stands between it and a second resident copy is which
+    entry happens to call `embed()` first — a routing detail, not a guarantee. It was left as a
+    module-level cache deliberately: moving it would be a change made on an argument, with
+    nothing measurable to show for it, which is the thing gap 35 declined to do. If a future
+    route in another graph embeds, this becomes gap 35 again, and the fix is the one line
+    `ner.ts` now carries.
 
 ## What I would build next
 
@@ -1409,8 +1443,10 @@ names that were getting out. Measured, the old detector replaced all ten person 
 the corpus too — `split`/`join` means finding a name once finds it everywhere — so nothing was
 leaking and nothing stopped leaking. What improved is that the app no longer redacts six things
 that are not people: precision, 50% to 100%. The price is 132 MB of model in the image and a
-2.9 s load at startup, which is a real cost bought for a real but narrower win than the item
-promised.
+a model load at startup, which is a real cost bought for a real but narrower win than the item
+promised. (That load was measured at 2,902 ms when this was written and at 865-898 ms when gap
+35 was closed, on a machine that had by then run the image repeatedly. The load time is not a
+stable number across runs; the count of loads, which is what gap 35 was about, is.)
 
 **Until the previous slice, the second item was "a shared spend
 ceiling."** It is now built, and what it cost is worth recording: the item read "and the

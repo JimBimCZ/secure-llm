@@ -125,12 +125,35 @@ export function personsIn(tokens: TaggedToken[], window: string): string[] {
   return found;
 }
 
-let taggerPromise: Promise<TokenClassificationPipeline> | null = null;
+/**
+ * The cache hangs off `globalThis`, not off this module, and that is the whole
+ * point rather than a detail.
+ *
+ * Next.js compiles `instrumentation` and the route handlers as separate server
+ * entries, and this file is bundled into each of them: the built output puts
+ * this loader in two chunks, one reached from `instrumentation` and one from
+ * `app/api/ask/route`. A module-level `let` is therefore per-entry, not
+ * per-process — each entry loaded its own tagger and held its own resident copy
+ * of a 132 MB model, so the startup warm-up warmed an instance the first
+ * question never used. `globalThis` is genuinely per-process, so both entries
+ * now share one load and one copy.
+ *
+ * `src/server/db/index.ts` reaches for the same mechanism against a different
+ * problem — a new pool on every dev-time module reload — and gates it on
+ * `NODE_ENV`. This one must NOT be gated: the duplication it prevents is a
+ * property of how the production bundle is split, so a development-only cache
+ * would fix it in the one environment where it does not happen.
+ */
+const globalForDetector = globalThis as unknown as {
+  personDetectorTagger?: Promise<TokenClassificationPipeline>;
+};
 
 function getTagger(): Promise<TokenClassificationPipeline> {
-  if (taggerPromise) return taggerPromise;
+  if (globalForDetector.personDetectorTagger) {
+    return globalForDetector.personDetectorTagger;
+  }
 
-  taggerPromise = (async () => {
+  globalForDetector.personDetectorTagger = (async () => {
     const { pipeline } = await transformers();
 
     const startedAt = Date.now();
@@ -147,7 +170,7 @@ function getTagger(): Promise<TokenClassificationPipeline> {
     return tagger;
   })();
 
-  return taggerPromise;
+  return globalForDetector.personDetectorTagger;
 }
 
 export function createNerDetector(): PersonDetector {
