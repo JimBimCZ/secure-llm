@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { registerHooks } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,18 +13,29 @@ import { pathToFileURL } from "node:url";
  * the two rules live here, in one place, with no dependency.
  */
 const SRC = path.join(import.meta.dirname, "..", "src");
+const OURS = [pathToFileURL(SRC).href, pathToFileURL(import.meta.dirname).href];
+
+const isOurs = (parentURL: string | undefined) =>
+  parentURL !== undefined && OURS.some((dir) => parentURL.startsWith(dir));
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier.startsWith("@/")) {
-      const target = path.join(SRC, `${specifier.slice(2)}.ts`);
+      const base = path.join(SRC, specifier.slice(2));
+      // `@/server/ai` is a folder with an index.ts, which is a resolution
+      // TypeScript does and ESM does not.
+      const target = existsSync(`${base}.ts`) ? `${base}.ts` : path.join(base, "index.ts");
       return nextResolve(pathToFileURL(target).href, context);
     }
 
-    // Relative sibling imports carry no extension in TypeScript source.
+    // Relative sibling imports carry no extension in TypeScript source. Only
+    // ours: a dependency's own extensionless `require("./lib/err")` is
+    // CommonJS, resolves perfectly well on its own, and must not be handed a
+    // `.ts` it does not have.
     if (
       (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !path.extname(specifier)
+      !path.extname(specifier) &&
+      isOurs(context.parentURL)
     ) {
       return nextResolve(`${specifier}.ts`, context);
     }

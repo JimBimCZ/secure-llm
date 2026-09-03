@@ -57,6 +57,14 @@ const envSchema = z.object({
   // thing in either mode. Tuned against the seed corpus — see the README.
   RAG_MIN_SCORE: z.coerce.number().min(0).max(1).default(0.25),
 
+  // --- Spending -------------------------------------------------------
+  // Questions one signed-in user may ask per minute. `/api/ask` is the only
+  // endpoint that costs money, and this is the ceiling on what one session can
+  // spend in a loop. Counted in this process's memory, so it is per instance;
+  // 0 disables it, which is what you want when a gateway in front of the app
+  // already enforces a budget.
+  ASK_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(0).default(20),
+
   // --- Retention ------------------------------------------------------
   // How long an LLM audit record (model, time, tokens, latency, outcome) is
   // kept before the hourly purge removes it. Fractional and zero are allowed
@@ -104,6 +112,7 @@ const BUILD_PHASE_PLACEHOLDERS: Env = {
   LLM_GATEWAY_API_KEY: undefined,
   RAG_TOP_K: 6,
   RAG_MIN_SCORE: 0.25,
+  ASK_RATE_LIMIT_PER_MINUTE: 20,
   RETENTION_AUDIT_DAYS: 30,
 };
 

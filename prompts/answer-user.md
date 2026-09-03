@@ -1,5 +1,5 @@
-Question:
+<question>
 {{question}}
+</question>
 
-Sources:
 {{sources}}
