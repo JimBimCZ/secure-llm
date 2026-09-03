@@ -10,7 +10,7 @@
  * not have.
  */
 const model = process.env.EMBEDDING_MODEL ?? "Xenova/all-MiniLM-L6-v2";
-const cacheDir = process.env.EMBEDDING_CACHE_DIR ?? "./.models";
+const cacheDir = process.env.MODEL_CACHE_DIR ?? "./.models";
 
 const { pipeline, env } = await import("@huggingface/transformers");
 env.cacheDir = cacheDir;

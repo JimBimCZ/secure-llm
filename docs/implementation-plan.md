@@ -123,10 +123,11 @@ RETENTION_AUDIT_DAYS  RETENTION_LOG_DAYS
 ```
 
 **Deviation, as built:** `RETENTION_LOG_DAYS` was NOT implemented, and `LLM_TIMEOUT_MS` and
-`EMBEDDING_CACHE_DIR` were added. Application and auth logs go to stdout — this process never
+`MODEL_CACHE_DIR` were added. Application and auth logs go to stdout — this process never
 stores them, so it cannot purge them, and shipping a variable that does nothing would have
 been worse than not having one. The reasoning is in the README's retention section, stated as
-an interpretation rather than guessed silently.
+an interpretation rather than guessed silently. (`EMBEDDING_CACHE_DIR` was its name until
+slice 16 put a second model in the process.)
 
 ## 8. Slice order
 

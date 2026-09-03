@@ -937,7 +937,7 @@ failing validation on an empty string.
 | `OIDC_INTERNAL_ORIGIN` | unset | Container-network address of the IdP. Unset for a public IdP |
 | `EMBEDDING_PROVIDER` | `local` | `local` \| `mock` |
 | `EMBEDDING_MODEL` | `Xenova/all-MiniLM-L6-v2` | Recorded on every chunk. Changing this, or the provider, makes existing chunks unsearchable until they are re-embedded — the app says so and offers the rebuild |
-| `EMBEDDING_CACHE_DIR` | `./.models` | Where the baked-in model lives |
+| `MODEL_CACHE_DIR` | `./.models` | Where the baked-in models live — both of them |
 | `LLM_PROVIDER` | `mock` | `anthropic` \| `openrouter` \| `gateway` \| `mock` |
 | `LLM_MODEL` | `claude-opus-5` | Model id **in the selected provider's namespace**; never hard-coded at a call site |
 | `LLM_TIMEOUT_MS` | `60000` | Deadline for one call. The request is **aborted**, not abandoned |
