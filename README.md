@@ -134,7 +134,13 @@ stack, with the corpus already loaded.
    `{"outcome":"rate_limited"}`. Asking something the corpus cannot answer keeps the whole
    loop free: the quota is consumed before the request body is read, and retrieval refuses
    below the score floor, so no model call is made at all.
-10. **The daily ceiling.** Ask one question, then look at the counter:
+10. **The daily ceiling.** Start from a known state:
+
+    ```bash
+    docker compose exec db psql -U pkb -d pkb -c "TRUNCATE user_spend, deployment_spend;"
+    ```
+
+    Ask one question, then look at the counter:
 
     ```bash
     docker compose exec db psql -U pkb -d pkb -c "SELECT * FROM user_spend;"
@@ -145,14 +151,15 @@ stack, with the corpus already loaded.
     limit."**, the server logs `{"outcome":"daily_limit_reached"}`, and **no `llm_calls` row
     is written** — the ceiling is checked before the model is reached. Set `window_start` back
     a day and restart to watch the purge log `{"table":"user_spend","purged":1}`.
-    Then set `ASK_DAILY_CALL_LIMIT_TOTAL=2` instead, restart, ask once as `alice`
-    and once as `admin`. The shared counter already carries the one call this
-    step made earlier, so alice's question is the deployment's second of the
-    day and still succeeds — then admin's own first question of the day is
-    refused with a different sentence — **"This deployment has reached
-    today's question limit."** — because a shared budget spent by someone
+
+    That first question also reserved against the shared counter — every call
+    does, whether or not `ASK_DAILY_CALL_LIMIT_TOTAL` is on — so truncate both
+    tables again before the shared half, the same command as above, then set
+    `ASK_DAILY_CALL_LIMIT_TOTAL=1` and restart: ask once as `alice` (**200**)
+    and once as `admin` (**429**, `{"error":"This deployment has reached
+    today's question limit."}`) — because a shared budget spent by someone
     else is not the reader having asked too many questions, and the app
-    should not tell them it is.
+    should not tell them it is. `deployment_spend.calls` reads `1`.
 11. **The embedder swap the app tells you about.** Set `EMBEDDING_PROVIDER=mock` and restart.
     `/ask` and `/documents` now carry a notice: *"None of your documents can be searched right
     now — 53 chunks in 10 documents indexed with `Xenova/all-MiniLM-L6-v2`. Retrieval now uses
