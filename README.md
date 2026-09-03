@@ -85,7 +85,12 @@ stack, with the corpus already loaded.
    set to?"* The embedder scores the chunks that answer it at 0.054 and 0.063 — far under the
    0.25 floor — so vector search alone returns nothing and the app would refuse. The exact
    match on `pl1`/`pl2` finds them, and the answer comes back cited. The server logs
-   `"lexicalHits":2`. See [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers).
+   `"lexicalHits":2`. Then ask *"What did I write about LGA 1718?"* — the same failure in the
+   two-token form, and the sharper one: the corpus defines that socket in as many words, and
+   the vector arm's best chunk scores **0.236** against the 0.25 floor, so the app used to
+   refuse. The pair `lga 1718` is searched for as a phrase, `"lexicalHits":2` again, and the
+   citation lands on the line that defines it.
+   See [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers).
 4. **Anonymization, outbound.** Ask *"What did Marek Dvorak say about the RAM kit?"* Expand
    **"N values redacted before this left the app"**: it shows the question exactly as it was
    sent — `What did [PERSON_1] say about the RAM kit?`
@@ -275,16 +280,35 @@ far below the 0.25 floor. The app said "Not found in your knowledge base." about
 had indexed.
 
 So retrieval has a second arm. It runs **only** when the question contains something shaped
-like a part number — at least three characters, mixing letters and digits — and it demands
-that every such token is present in the chunk (`plainto_tsquery` ANDs its terms). The two
-rankings are combined with reciprocal rank fusion, because a cosine similarity and a text rank
-are not on a scale that can be compared, while their ranks are.
+like a part number, and it demands that every such term is present in the chunk. Two shapes
+count:
+
+- **One token mixing letters and digits**, at least three characters: `ddr5-6000`, `B650E`,
+  `PL2`. Prose does not look like this, and a bare `5600` is far more often a year, a price
+  or a quantity than an identifier.
+- **A short word followed immediately by a number**: `LGA 1718`, `PCIe 5.0`, `RTX 4090`.
+  Neither half qualifies on its own — `lga` has no digit, `1718` no letter — and this is how
+  a great many identifiers are written. The word must be 2–5 letters and not a function word,
+  and the number must carry two digits, so `since 2023` and `Ryzen 9` do not pair.
+
+The second shape admits a bare number, which is the thing the first shape exists to refuse.
+What makes it safe is that **each term is searched for as a phrase** (`phraseto_tsquery`,
+ANDed): `1718` is only ever looked for sitting immediately after `lga`, in the question and
+in the chunk alike. A chunk reading *"LGA 1851 … 1700 pins"* does not match `lga 1700`, and
+`PCIe 4.0` does not match `pcie 5.0` — which is exactly the discrimination the embedder
+cannot make. For a one-word term a phrase query is identical to the AND query used before, so
+nothing about the existing behaviour moved.
+
+The two rankings are combined with reciprocal rank fusion, because a cosine similarity and a
+text rank are not on a scale that can be compared, while their ranks are.
 
 Measured on the same corpus, after:
 
 | Question | Vector arm | What the lexical arm added |
 | --- | --- | --- |
 | *what are PL1 and PL2 set to?* | 0 hits — a false refusal | The 2 chunks that answer it, at 0.054 and 0.063 |
+| *what did I write about LGA 1718?* | 0 hits — a false refusal, top score 0.236 against a 0.25 floor | The 2 chunks naming the socket, one of them the line that defines it |
+| *is PCIe 5.0 worth it for an SSD?* | 6 hits, already correct | 4 chunks naming that generation specifically |
 | *is ddr5-6000 cl30 worth it over a slower kit?* | 6 hits, the two most specific ranked out | 2 chunks naming the exact kit, at 0.355 and 0.329 |
 | *does my monitor need UHBR20?* | 6 hits, already correct | Nothing — identical result |
 | *how should I size a power supply…* | 6 hits | Arm never runs: no part number in the question |
@@ -771,7 +795,7 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 92 tests, node --test, no test framework
+npm test          # 100 tests, node --test, no test framework
 npm run typecheck
 ```
 
@@ -788,7 +812,7 @@ money incident rather than a visible bug:
 | The `gateway` provider | Against a stub gateway: the route, the bearer credential, the request, the parsing |
 | `consumeAskQuota` | The ceiling on what one session can spend |
 | `spendDecision` | The daily ceiling's boundary: the call that is allowed and the one that is not |
-| `distinctiveTokens` | It decides whether the lexical arm runs at all — return the wrong thing and the refusal path changes |
+| `distinctiveTerms` | It decides whether the lexical arm runs at all — return the wrong thing and the refusal path changes |
 | `fuseByRank` | That fusion only ORDERS: an empty result stays empty, and a lexical-only chunk is never dropped |
 | `describeStaleness` | Whether the app notices that its own index has gone unreachable — the one failure that is invisible from the inside |
 
@@ -867,15 +891,16 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
    display and the admin count. Authorization never reads it, so a stale value is cosmetic —
    but anyone reading the schema should know it is there and why it is not authoritative.
 10. **The Keycloak realm uses `start-dev`.** Correct for a mock IdP, wrong for anything else.
-11. **The lexical arm cannot see a part number written as two tokens.** It requires a token
-    that mixes letters and digits, so `ddr5-6000`, `B650E` and `PL2` are found and `RTX 4090`
-    — brand and number separated by a space — is not: `RTX` has no digit and `4090` no letter.
-    Admitting bare numbers was the alternative and it is worse, because a bare number is far
-    more often a year, a price or a quantity than an identifier, and every question mentioning
-    one would start dragging chunks past the score floor. Pairing a capitalised word with a
-    following number would catch this case and is the obvious next refinement; it is not here
-    because nothing in the seed corpus is written that way, and a heuristic with no example to
-    test against is a guess.
+11. **The two-token rule misses a one-digit designation, and a word longer than five
+    letters.** `LGA 1718` and `PCIe 5.0` are found; `Ryzen 9` is not, because one digit after
+    a word is more often a count than a designation, and `memory 6000` is not, because five
+    letters is where identifiers stop and sentences start. Both limits are the price of not
+    pairing `since 2023` and `under 1500` with everything they precede, and both are
+    arbitrary in the way any threshold is. The function-word list that does the rest of that
+    work is deliberately tiny and English-only.
+    (This gap previously claimed the seed corpus contained no two-token identifier to test
+    against. That was wrong — `LGA 1700/1718/1851` is in two documents and `PCIe 3.0/4.0/5.0`
+    in three — and the rule was built and measured against them.)
 12. **The lexical arm does no stemming and no synonyms.** It uses the `simple` dictionary, so
     it matches identifiers exactly and matches nothing else — `NVMe` will not find `NVM`, and a
     typo finds nothing. That is the intended trade for a part-number arm, but it means the arm
@@ -915,11 +940,12 @@ In this order, and for these reasons:
 
 1. **Run the `anthropic` path end to end and re-measure.** Gap 1 above. Everything else is
    downstream of knowing the real path works.
-2. **Finish the retriever.** The lexical arm now catches part numbers written as one token
-   (see [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers)); gaps 11
-   and 12 are what it still cannot do. The next honest step is a real BM25 arm for prose
-   questions — which needs the score floor rethought, because that is the thing currently
-   holding the refusal path up.
+2. **A BM25 arm for prose.** The lexical arm now catches part numbers in both the forms this
+   corpus writes them (see
+   [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers)), and gaps 11
+   and 12 are what it still cannot do. Ordinary prose questions remain entirely the vector
+   arm's job. A real BM25 arm is the next honest step, and it needs `RAG_MIN_SCORE` rethought
+   first, because that floor is the thing currently holding the refusal path up.
 3. **A shared spend ceiling.** The daily cap now exists, in a table of its own — the audit
    table could not hold it without becoming a behavioural log. What is still missing is a cap
    across *all* users, which is what an operator with a monthly budget actually wants, and
