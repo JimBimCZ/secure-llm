@@ -126,8 +126,8 @@ describe("askQuestion", () => {
   /**
    * The two daily ceilings, as the ask flow meets them.
    *
-   * The reservation itself is SQL and gets no unit test — see the README's
-   * gaps. What IS testable here, because the dependency is injected, is the
+   * The reservation itself is SQL and gets no unit test — see README gap 29.
+   * What IS testable here, because the dependency is injected, is the
    * orchestration around it: that a refused reservation never reaches a
    * provider, that the scope survives to the route which has to name the right
    * ceiling, and that the retry is charged as the second real call it is.

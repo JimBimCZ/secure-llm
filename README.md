@@ -140,7 +140,9 @@ stack, with the corpus already loaded.
     docker compose exec db psql -U pkb -d pkb -c "TRUNCATE user_spend, deployment_spend;"
     ```
 
-    Ask one question, then look at the counter:
+    Ask one question the corpus can answer (item 1's, say — an unanswerable one
+    never reaches `reserveCall`, since retrieval refuses first, and would leave
+    the counter at 0), then look at the counter:
 
     ```bash
     docker compose exec db psql -U pkb -d pkb -c "SELECT * FROM user_spend;"
@@ -154,11 +156,17 @@ stack, with the corpus already loaded.
 
     That first question also reserved against the shared counter — every call
     does, whether or not `ASK_DAILY_CALL_LIMIT_TOTAL` is on — so truncate both
-    tables again before the shared half, the same command as above, then set
-    `ASK_DAILY_CALL_LIMIT_TOTAL=1` and restart: ask once as `alice` (**200**)
-    and once as `admin` (**429**, `{"error":"This deployment has reached
-    today's question limit."}`) — because a shared budget spent by someone
-    else is not the reader having asked too many questions, and the app
+    tables again before the shared half:
+
+    ```bash
+    docker compose exec db psql -U pkb -d pkb -c "TRUNCATE user_spend, deployment_spend;"
+    ```
+
+    then set `ASK_DAILY_CALL_LIMIT_TOTAL=1` and restart: ask once as `alice`
+    (**200**) and once as `admin` (**429**, `{"error":"This deployment has
+    reached today's question limit."}`) — both questions the corpus can
+    answer, for the same reason as above — because a shared budget spent by
+    someone else is not the reader having asked too many questions, and the app
     should not tell them it is. `deployment_spend.calls` reads `1`.
 11. **The embedder swap the app tells you about.** Set `EMBEDDING_PROVIDER=mock` and restart.
     `/ask` and `/documents` now carry a notice: *"None of your documents can be searched right
@@ -806,10 +814,13 @@ budget for it, the question ends at the refusal the first attempt had already ea
 Token totals cannot be reserved the same way — they are only known once the provider returns,
 so they are added by a separate, best-effort update after the call, against the window at that
 later moment. A call reserved at 23:59:58 and answered four seconds later is charged against
-today's counter, correctly, and then has its tokens added to tomorrow's row, where they match
-nothing. The ceiling is unaffected — it counts calls, and the call was already charged — so
-only the token totals for the handful of calls in flight across one midnight a day go missing.
-Written down rather than fixed; see gap 28.
+today's counter, correctly, and then has its tokens applied against tomorrow's window: if
+nobody has reserved against tomorrow yet the update matches no row and the tokens are lost, and
+if someone has — a deployment with more than one user, which is the case this table exists for
+— it lands on their row and the tokens are added to tomorrow's totals instead. The ceiling is
+unaffected either way — it counts calls, and the call was already charged — so only where the
+token totals for the handful of calls in flight across one midnight a day end up is in
+question. Written down rather than fixed; see gap 28.
 
 ### Retention
 
@@ -995,7 +1006,7 @@ money incident rather than a visible bug:
 | PDF extraction | Against the seed PDF itself, the file whose layout produced the defect |
 | The `gateway` provider | Against a stub gateway: the route, the bearer credential, the request, the parsing |
 | `consumeAskQuota` | The ceiling on what one session can spend |
-| `spendDecision` | The daily ceiling's boundary: the call that is allowed and the one that is not |
+| `spendDecision` | The pure arithmetic behind the daily ceiling's pre-check and its retry-after — not the enforcing boundary itself, which is `reserveCall`'s untested SQL (gap 29) |
 | `distinctiveTerms` | It decides whether the identifier arm runs at all — return the wrong thing and the refusal path changes |
 | `fuseByRank` | That fusion only ORDERS: an empty result stays empty, and a lexical-only chunk is never dropped |
 | `describeStaleness` | Whether the app notices that its own index has gone unreachable — the one failure that is invisible from the inside |
@@ -1208,17 +1219,36 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
 27. **No fairness within the shared ceiling.** One user can consume all of it,
     bounded only by their own per-user cap. Fair shares mean per-user quotas
     expressed against the total, which is a larger feature than this one.
-28. **`recordTokens` loses a call's token totals across UTC midnight.** The
-    call is charged at reservation time against that moment's window; the
-    token totals are added after the provider answers, against a window
-    recomputed at THAT moment. A call reserved at 23:59:58 and answered four
-    seconds later updates the next day's rows, matches nothing, and silently
-    drops its tokens. The ceiling is unaffected — it counts calls, and the call
-    was already charged — so only the token totals go missing. Closing it
-    means threading the reserved window through to `recordTokens`, which is a
-    change to a reviewed type plus a field in every test stub, to recover
-    reporting for the handful of calls in flight across one midnight a day.
-    Written down instead.
+28. **`recordTokens` can misplace a call's token totals across UTC
+    midnight.** The call is charged at reservation time against that
+    moment's window; the token totals are added after the provider answers,
+    against a window recomputed at THAT moment. A call reserved at 23:59:58
+    and answered four seconds later updates the next day's rows — matching
+    nothing and silently dropping the tokens if those rows don't exist yet,
+    or landing on them and adding to the next window's totals if another
+    reservation already created them. The ceiling is unaffected either way —
+    it counts calls, and the call was already charged — so only where the
+    token totals end up is in question. Closing it means threading the
+    reserved window through to `recordTokens`, which is a change to a
+    reviewed type plus a field in every test stub, to recover reporting for
+    the handful of calls in flight across one midnight a day. Written down
+    instead.
+29. **`reserveCall`'s reservation SQL has no automated test.** The predicate
+    that actually enforces both ceilings — the `WHERE calls < $limit` inside
+    each upsert — is SQL, and the test suite deliberately opens no database
+    connection, because a test that does can pass for the wrong reason. A
+    TypeScript reimplementation of the predicate would test the copy rather
+    than the query, which is the failure mode slice 13's `&&` precedence bug
+    already demonstrated — a green suite past a broken query — the same
+    reasoning gap 23 recorded for the prose arm's SQL one slice earlier.
+    `spendDecision`, tested above, is not this predicate: it is the pure
+    arithmetic behind `checkDailySpend`'s pre-check and the retry-after, and
+    `checkDailySpend` says so itself — "This is NOT the control." The
+    controlling verification is instead the measured concurrent burst
+    against the running stack, recorded in the spend section above: 12
+    concurrent requests against a ceiling of 5 leave the counter at exactly
+    5. The residual risk is plain: a future edit to that SQL can break the
+    ceiling, and only another manual pass would catch it.
 
 ## What I would build next
 

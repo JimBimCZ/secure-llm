@@ -304,14 +304,18 @@ export async function reserveCall(
  * an update, and an update matching nothing is a no-op rather than an error.
  * The exception is a call that straddles UTC midnight: this recomputes the
  * window from answer time, so a call reserved at 23:59:58 and answered four
- * seconds later updates the NEXT day's rows, matches nothing, and loses its
- * token totals. The CEILING is unaffected, because the ceiling counts calls
- * and the call was already charged; only the token totals go missing, which
- * is the direction this function is already willing to be wrong in.
+ * seconds later updates the NEXT day's rows — which either matches nothing
+ * and loses the token totals, or, if another reservation has already
+ * created that window's rows, matches them and adds the totals to the NEXT
+ * window's count instead. The CEILING is unaffected either way, because the
+ * ceiling counts calls and the call was already charged; only where the
+ * token totals land is in question, which is the direction this function is
+ * already willing to be wrong in.
  *
  * Like the audit record, a failure to count must never fail the user's
- * question: the answer is already computed and correct. Losing token totals
- * loses reporting, never the ceiling, because the ceiling counts calls.
+ * question: the answer is already computed and correct. Misplaced token
+ * totals cost reporting, never the ceiling, because the ceiling counts
+ * calls.
  */
 export async function recordTokens(
   sub: string,
