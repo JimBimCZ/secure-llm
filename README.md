@@ -1374,8 +1374,13 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     instance. Measured against the running stack: the startup log shows one load, then the
     first question after startup triggers a second, separately logged, load. The narrower
     safety claim survives — a detector that cannot load throws at startup and stops the
-    deployment before any question reaches it — but the cost claim does not: the first question
-    still pays the full load cost again, on top of the one startup already paid.
+    deployment before any question reaches it — but the cost claim does not, and it is paid
+    twice over. In time: the first question still pays the full load again, on top of the one
+    startup already paid. In memory: the process holds **two** resident copies of a 132 MB
+    model rather than one, for the life of the container. Closing it means keying the cache on
+    `globalThis` instead of on the module, which is what makes a singleton survive Next.js
+    handing the same file to two entries — a small change, and one this project has not
+    measured, so it is written down here rather than made on the strength of an argument.
 
 ## What I would build next
 
