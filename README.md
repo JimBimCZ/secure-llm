@@ -106,7 +106,10 @@ stack, with the corpus already loaded.
 6. **Server-side authorization.** Signed in as `alice`, open
    http://localhost:3000/api/admin/stats → **403 `{"error":"insufficient role"}`**, from the
    server, with no UI involved. Signed in as `admin` → 200. Nothing is hidden in the browser;
-   the guard is the control.
+   the guard is the control. It also reports today's shared spend — `today.calls` against
+   `today.limit` — because a ceiling an operator cannot observe is how `ASK_RATE_LIMIT_PER_MINUTE`
+   and `ASK_DAILY_CALL_LIMIT` each spent a slice silently pinned to their defaults in Docker. It
+   names no user, because the table it reads holds none.
 7. **Retention, enforced.** Set `RETENTION_AUDIT_DAYS=0`, restart, and watch the log line
    `{"table":"llm_calls","purged":N,"msg":"retention purge"}` and an empty table. Set it back
    to 30.
@@ -142,6 +145,11 @@ stack, with the corpus already loaded.
     limit."**, the server logs `{"outcome":"daily_limit_reached"}`, and **no `llm_calls` row
     is written** — the ceiling is checked before the model is reached. Set `window_start` back
     a day and restart to watch the purge log `{"table":"user_spend","purged":1}`.
+    Then set `ASK_DAILY_CALL_LIMIT_TOTAL=1` instead, restart, ask once as `alice`
+    and once as `admin`: the second is refused with a different sentence — **"This
+    deployment has reached today's question limit."** — because a shared budget
+    spent by someone else is not the reader having asked too many questions, and
+    the app should not tell them it is.
 11. **The embedder swap the app tells you about.** Set `EMBEDDING_PROVIDER=mock` and restart.
     `/ask` and `/documents` now carry a notice: *"None of your documents can be searched right
     now — 53 chunks in 10 documents indexed with `Xenova/all-MiniLM-L6-v2`. Retrieval now uses
@@ -727,40 +735,67 @@ needing a different justification. Failed calls are recorded too, with zero toke
 Errors are audited by the error's **class name**, never its message: a provider error can echo
 the request back, and the request contains the user's own notes.
 
-### The daily spend cap, and the one thing it does record
+### The three spend ceilings, and what each one is for
 
-`ASK_RATE_LIMIT_PER_MINUTE` bounds the **pace** of spending. It does nothing about a user
-asking nineteen questions a minute all day, which is the same bill arriving more slowly. So
-there is a second ceiling, `ASK_DAILY_CALL_LIMIT`, on the **total**.
+`ASK_RATE_LIMIT_PER_MINUTE` bounds the **pace** of one person's spending.
+`ASK_DAILY_CALL_LIMIT` bounds their **total**. Neither bounds the **bill**,
+which is every user added together, and that is what `ASK_DAILY_CALL_LIMIT_TOTAL`
+is for — the number an operator with a monthly budget actually holds.
 
-A ceiling has to know how much someone has already spent, and the audit table above refuses —
-correctly — to know who spent it. Rather than reverse that decision, the counter is a separate
-table shaped so it cannot become the thing `llm_calls` declined to be:
+A ceiling has to know how much has already been spent, and the audit table above refuses —
+correctly — to know who spent it. Rather than reverse that decision, the two counted ceilings
+live in tables of their own, shaped so neither can become the thing `llm_calls` declined to be:
 
-| | `llm_calls` | `user_spend` |
-| --- | --- | --- |
-| Rows | One **per call** | One **per user per day**, updated in place |
-| Subject | None | The subject — that is the point |
-| Timestamps | Per call | The window only; no per-question time |
-| Retention | 30 days | The current day; every earlier window is purged hourly |
+| | `llm_calls` | `user_spend` | `deployment_spend` |
+| --- | --- | --- | --- |
+| Rows | One **per call** | One **per user per day**, updated in place | One **per day**, updated in place |
+| Subject | None | The subject — that is the point | None, the same control `llm_calls` uses |
+| Timestamps | Per call | The window only; no per-question time | The window only |
+| Retention | 30 days | The current day; every earlier window purged hourly | The current day; every earlier window purged hourly |
 
-One row per user per day, incremented in Postgres by an upsert, with no per-call row, no
-ordering and no per-question timestamp. Nothing in it can be read back as *"what did this
-person ask, and when"* — the most it can say is *"this subject made N calls today"*. That is
-the minimum a ceiling can know, and it is stated here rather than buried: **the database now
-records that a given user made N calls today**, where before it recorded nothing about who.
-`Delete my account` removes those rows in the same transaction as the documents.
+Nothing in either counted table can be read back as *"what did this person ask, and when"* —
+the most `user_spend` can say is *"this subject made N calls today"*, and `deployment_spend`
+cannot even say that much about anybody. `Delete my account` removes the `user_spend` rows in
+the same transaction as the documents; `deployment_spend` holds no subject, so there is nothing
+in it belonging to any one person to delete (gap 26 below is the visible cost of that).
 
 The cap counts **calls**, not tokens, because the size of one call is already bounded —
 `RAG_TOP_K` chunks in, a capped answer out — so a ceiling on calls is a ceiling on money, and
 "200 questions today" is a number a user who hits it can act on in a way that "140,000 tokens"
-is not. Tokens are summed into the counter anyway, so the truer figure is there when a token
+is not. Tokens are summed into both counters anyway, so the truer figure is there when a token
 cap is wanted.
 
-The check runs in the route before the request body is read, and the increment runs after the
-model actually answers — so the "Not found in your knowledge base." path, which never reaches
-a model, never costs anyone a call. The retry counts separately, because it is a second real
-call.
+All three are enforced before a call is made, not counted after it. A call is
+**reserved**, by one statement per counter:
+
+    INSERT INTO deployment_spend (window_start, calls) VALUES ($1, 1)
+    ON CONFLICT (window_start) DO UPDATE
+       SET calls = deployment_spend.calls + 1
+     WHERE deployment_spend.calls < $2
+    RETURNING calls
+
+Postgres holds a row lock for the duration of that upsert, so the read the
+`WHERE` performs and the write it guards cannot be separated by another
+transaction. **No returned row means denied.** The reservation *is* the check,
+so there is no second step to race against — which is what the previous
+read-then-write had, and what gap 13 recorded. Both counters are reserved in
+one transaction, the per-user row locked first so the lock order is always the
+same, and **no model call happens inside it**: it holds two indexed upserts and
+nothing else. A lock held across the provider's latency is still exactly the
+thing this refuses to do.
+
+Measured on the running stack: 12 concurrent questions against a ceiling of 5 leave the
+counter at exactly 5. The retry the citation guard is allowed is a second real call, so it
+reserves again; if there is no budget for it, the question ends at the refusal the first
+attempt had already earned.
+
+Token totals cannot be reserved the same way — they are only known once the provider returns,
+so they are added by a separate, best-effort update after the call, against the window at that
+later moment. A call reserved at 23:59:58 and answered four seconds later is charged against
+today's counter, correctly, and then has its tokens added to tomorrow's row, where they match
+nothing. The ceiling is unaffected — it counts calls, and the call was already charged — so
+only the token totals for the handful of calls in flight across one midnight a day go missing.
+Written down rather than fixed; see gap 28.
 
 ### Retention
 
@@ -888,6 +923,7 @@ failing validation on an empty string.
 | `RAG_MIN_SCORE` | `0.25` | Similarity floor; below it, "Not found in your knowledge base." |
 | `ASK_RATE_LIMIT_PER_MINUTE` | `20` | Questions one signed-in user may ask per minute. `0` disables it. Counted in-process, so it is per instance |
 | `ASK_DAILY_CALL_LIMIT` | `200` | Model calls one user may make per UTC day. `0` disables it. Counted in the database, so it survives a restart |
+| `ASK_DAILY_CALL_LIMIT_TOTAL` | `0` | Model calls the whole deployment may make per UTC day, across every user. `0` disables it. Defaults to off because how many calls a deployment should afford depends on how many people it serves, which the app cannot know |
 | `RETENTION_AUDIT_DAYS` | `30` | Audit record lifetime. `0` purges everything on next run |
 
 `RAG_MIN_SCORE` is measured, not guessed: answerable questions against the seed corpus score
@@ -1020,7 +1056,9 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
    direction to be wrong in for a spend ceiling, but a real limitation. The control belongs at
    the gateway that already sees every call and holds the budget; this is the honest in-app
    approximation of it, not a replacement. `ASK_DAILY_CALL_LIMIT` is counted in the database
-   instead, so it survives both a restart and a second replica — but see gaps 13 and 14.
+   instead, so it survives both a restart and a second replica — gaps 13 and 14, the race in
+   that counting, are closed as of slice 15, and gap 24 below is what the same table costs once
+   a shared counter is contended by every user rather than one.
 9. **`users.role_snapshot` can go stale.** It is refreshed at sign-in and used only for
    display and the admin count. Authorization never reads it, so a stale value is cosmetic —
    but anyone reading the schema should know it is there and why it is not authoritative.
@@ -1043,19 +1081,26 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     chunks under `simple` and 2 under `english`). This gap used to say "the lexical arm", full
     stop, and to claim that ordinary prose questions remained entirely the vector arm's job.
     Since the prose arm exists that is no longer true, and the narrowing is the point.
-13. **The daily cap is checked and incremented separately, so a burst can overshoot it.** The
-    count is read when the request arrives and written after the model answers; requests in
-    flight at the same moment all read the same number. The overshoot is bounded by how many
-    can be in flight, which `ASK_RATE_LIMIT_PER_MINUTE` already bounds, and a ceiling that is
-    occasionally a call or two generous is a much smaller problem than one taking a lock on
-    every question. A single `INSERT … RETURNING` doing both at once would close it, at the
-    cost of counting calls that then fail.
-14. **A model call that times out or errors is not counted against the daily cap.** It is
-    counted in `llm_calls`, with zero tokens, because it consumed a deadline — but the spend
-    counter only increments once a call returns, so a provider failing slowly is bounded by
-    the per-minute limit rather than by the daily one. The window is small and the per-minute
-    limit covers it; closing it properly means counting before the call and reconciling after,
-    which is more machinery than the exposure justifies.
+13. **~~The daily cap is checked and incremented separately~~ — closed, and it
+    took correcting an earlier decision to close it.** A call is now reserved
+    before it is made, by one `INSERT … ON CONFLICT … DO UPDATE SET calls =
+    calls + 1 WHERE calls < $limit RETURNING calls` per counter: no returned
+    row means denied, and the reservation is the check, so there is no second
+    step to race against. Measured, 12 concurrent questions against a ceiling
+    of 5 leave the counter at exactly 5; before this it overshot.
+    Slice 11 had rejected exactly this, on the grounds that counting before the
+    call "charges for calls that then fail". Gap 14 below complained about the
+    same behaviour from the other side — that a timed-out call is *not*
+    charged, though it consumed a deadline and `llm_calls` already records it
+    with zero tokens. Both were written the same day and only one could be
+    right. Gap 14 was, so one statement closed both, and charging for a failed
+    call is the behaviour rather than its price. What is *still* rejected, for
+    slice 11's reason unchanged, is a lock held across the model call: this
+    transaction holds two indexed upserts and nothing else.
+14. **~~A model call that times out or errors is not counted against the daily
+    cap~~ — closed as a consequence of 13.** Measured with `LLM_TIMEOUT_MS=1`:
+    the call fails, `llm_calls` records it with zero tokens as before, and the
+    spend counter now reads 1 where it used to read 0.
 15. **Re-embedding replays stored text; it does not re-extract.** The input is
     `documents.content`, the text as the extractor read it at upload — so a document ingested
     before a change to extraction keeps whatever that extractor produced, and the PDF
@@ -1117,6 +1162,39 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     retrieval, and only another manual pass would catch it. Same spirit as gaps 1 and 2, which
     admit that the `anthropic` and `gateway` providers are verified by construction rather than
     by execution.
+24. **Every question in the deployment contends on one row.** The shared
+    counter is a single row and every reservation locks it. Inside a
+    transaction holding two indexed upserts and no network call that is
+    microseconds, at the personal scale gap 6 already assumes. At real scale it
+    is a serialisation point on the hottest path, and the answer there is a
+    sharded counter or a budget held by the gateway — which is where gap 8
+    already says this control belongs.
+25. **A provider failing every call still burns the day's budget.** That is the
+    deliberate direction — gap 14 above asked for exactly it — and it has a
+    cost: an outage can exhaust the ceiling without a single answer being
+    produced. The alternative is a refund path, which is a compensating write
+    that can itself fail, and a ceiling that goes generous during an outage is
+    the worse of the two.
+26. **The shared counter cannot un-count a user who has deleted their account,
+    and should not.** "Delete my account" wipes their `user_spend` row; their
+    contribution to the deployment's total stays, because the money was spent.
+    It is the visible asymmetry between the two tables, and it is written down
+    because the instinct on reading §7's promise is that this is a bug. A total
+    any user could lower by leaving would not be a ceiling.
+27. **No fairness within the shared ceiling.** One user can consume all of it,
+    bounded only by their own per-user cap. Fair shares mean per-user quotas
+    expressed against the total, which is a larger feature than this one.
+28. **`recordTokens` loses a call's token totals across UTC midnight.** The
+    call is charged at reservation time against that moment's window; the
+    token totals are added after the provider answers, against a window
+    recomputed at THAT moment. A call reserved at 23:59:58 and answered four
+    seconds later updates the next day's rows, matches nothing, and silently
+    drops its tokens. The ceiling is unaffected — it counts calls, and the call
+    was already charged — so only the token totals go missing. Closing it
+    means threading the reserved window through to `recordTokens`, which is a
+    change to a reviewed type plus a field in every test stub, to recover
+    reporting for the handful of calls in flight across one midnight a day.
+    Written down instead.
 
 ## What I would build next
 
@@ -1124,16 +1202,21 @@ In this order, and for these reasons:
 
 1. **Run the `anthropic` path end to end and re-measure.** Gap 1 above. Everything else is
    downstream of knowing the real path works.
-2. **A shared spend ceiling.** The daily cap now exists, in a table of its own — the audit
-   table could not hold it without becoming a behavioural log. What is still missing is a cap
-   across *all* users, which is what an operator with a monthly budget actually wants, and
-   the reconciliation that gaps 13 and 14 describe.
-3. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
+2. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
    honestly described. A NER model would raise precision above 50% without changing a single
    call site — the seam is already there.
-4. **Streaming answers.** Currently the user waits for the whole response. The citation guard
+3. **Streaming answers.** Currently the user waits for the whole response. The citation guard
    has to run on a complete answer, so this needs care: stream the text, hold the sources
    until the guard has passed.
+
+**This list used to hold "a shared spend ceiling" as its second item.** It is
+now built, and what it cost is worth recording: the item read "and the
+reconciliation that gaps 13 and 14 describe", treating that as work attached to
+the ceiling. It was the ceiling's precondition. Gap 13's justification —
+that the overshoot is bounded by `ASK_RATE_LIMIT_PER_MINUTE` — held only while
+the requests racing each other belonged to one user. A counter every user
+contends on makes the bound N × 20, against the one ceiling whose whole purpose
+is to stand between an operator and a bill.
 
 **This list used to hold a second item, "a BM25 arm for prose". It is now built** — see
 [Retrieval](#retrieval-three-arms-because-an-embedder-forgets-the-words). Its stated

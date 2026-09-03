@@ -1,7 +1,7 @@
 # Slice 15 — a shared spend ceiling, and the race that had to close with it
 
 **Date:** 2026-09-03
-**Status:** designed
+**Status:** implemented
 **Requirement it serves:** CLAUDE.md §3, *LLM and data* — every call that leaves the process is
 bounded and audited. Slices 9 and 11 bounded what **one** user can spend. Nothing bounds what
 the **deployment** spends, which is the number an operator with a monthly budget actually holds.
