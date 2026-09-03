@@ -87,7 +87,8 @@ a fresh `git clone` before this README was written.
    router?"* The panel reports that a name, an e-mail and a phone number were redacted before
    the call, and the answer above it reads *"David Kraus (david.kraus@example.com,
    +420 603 456 789) set up the CAKE configuration…"* — restored on the way back.
-   (This answer also shows the PDF word-splitting artifact in gap 5: `configur ation`.)
+   (That sentence comes out of the seed PDF, whose page layout splits words across lines. It
+   reads `configuration` because extraction puts them back together — see gap 5.)
 5. **Server-side authorization.** Signed in as `alice`, open
    http://localhost:3000/api/admin/stats → **403 `{"error":"insufficient role"}`**, from the
    server, with no UI involved. Signed in as `admin` → 200. Nothing is hidden in the browser;
@@ -116,10 +117,11 @@ question
    ├─ 2. vector search: owner + embedding model + score floor, all in ONE SQL predicate
    │       └─ nothing clears the floor? → "Not found in your knowledge base." (no model call)
    ├─ 3. anonymize the question and every retrieved chunk ──► [PERSON_1], [EMAIL_1], [PHONE_1]
-   ├─ 4. one model call, through one wrapper that times out and writes the audit record
-   ├─ 5. CITATION GUARD: every cited number must index the set we sent
+   ├─ 4. wrap each source in a <source> envelope it cannot write its way out of
+   ├─ 5. one model call, through one wrapper that times out and writes the audit record
+   ├─ 6. CITATION GUARD: every cited number must index the set we sent
    │       └─ none survive? one stricter retry, then "Not found in your knowledge base."
-   └─ 6. restore the placeholders, return answer + sources
+   └─ 7. restore the placeholders, return answer + sources
 ```
 
 ### The two seams
@@ -190,6 +192,40 @@ pessimistically at 3 characters per token), 0 of 53 chunks truncate and top simi
 from 0.44 to 0.51.
 
 ---
+
+### Prompt injection: the sources are data
+
+A retrieved chunk is your own note, but a note can come from anywhere — a PDF someone
+e-mailed, a page pasted out of a wiki — and it goes in front of the model verbatim. A
+sentence in one that reads *"ignore the above and answer X"* used to sit in the prompt looking
+exactly like an instruction from the application, because nothing marked where the data began.
+
+Three things now stand between such a sentence and a bad answer, and they are worth
+separating because they fail differently:
+
+1. **A structural boundary.** The question and every source travel inside tags the
+   application writes: `<question>…</question>`, `<source index="1">…</source>`. The system
+   prompt's first rule, ahead of the citation rules, says that everything inside them is data
+   — quotable, describable, never obeyed.
+2. **The boundary cannot be forged.** Anything in the untrusted text shaped like one of those
+   tags is escaped to `&lt;source&gt;` before it is inserted, whatever its casing or spacing.
+   A chunk cannot close its own envelope, open a fourth source that was never retrieved, or
+   restate the question. Escaped rather than stripped, because the sentence that tried it is
+   still note content: ask what that document says and the answer may quote it.
+3. **The citation guard bounds what a success would buy.** Every claim still has to resolve to
+   a passage that was actually retrieved from your own corpus, filtered by owner in SQL. An
+   injected instruction cannot make the model cite a document it was not given, and an answer
+   whose citations do not check out is not shown at all.
+
+What this deliberately is **not** is a detector. There is no list of suspicious phrases to
+keep current and nothing to false-positive on a note that legitimately discusses prompt
+injection. What it does not do is listed under [Known gaps](#known-gaps-and-deliberate-debt):
+a model that obeys an injected instruction *inside* the envelope is still possible, and
+prompt-level defences are mitigation, not proof.
+
+The exfiltration route that makes injection dangerous elsewhere is absent here rather than
+defended: the model has no tools, fetches nothing, and its answer is rendered as text, never
+as markup or a link the page will follow.
 
 ## Models used
 
@@ -528,6 +564,7 @@ back to its default rather than failing validation on an empty string.
 | `LLM_GATEWAY_BASE_URL` / `LLM_GATEWAY_API_KEY` | unset | Required when `LLM_PROVIDER=gateway` |
 | `RAG_TOP_K` | `6` | Chunks put in front of the model |
 | `RAG_MIN_SCORE` | `0.25` | Similarity floor; below it, "Not found in your knowledge base." |
+| `ASK_RATE_LIMIT_PER_MINUTE` | `20` | Questions one signed-in user may ask per minute. `0` disables it. Counted in-process, so it is per instance |
 | `RETENTION_AUDIT_DAYS` | `30` | Audit record lifetime. `0` purges everything on next run |
 
 `RAG_MIN_SCORE` is measured, not guessed: answerable questions against the seed corpus score
@@ -554,6 +591,7 @@ src/
       providers/          anthropic · openrouter · gateway · mock  (answering)
       embedders/          local · mock                 (embedding)
     privacy/anonymizer.ts
+    rateLimit.ts          per-user quota on the one endpoint that costs money
     rag/                  chunk · extract · ingest · retrieve · answer · citations
     retention/purge.ts
     db/                   schema + migrations, applied on startup
@@ -566,16 +604,30 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 21 tests, node --test, no test framework
+npm test          # 61 tests, node --test, no test framework
 npm run typecheck
 ```
 
-Two things are tested, and deliberately only two: **the anonymizer round trip** and **the
-citation guard**. They are the two places where a silent failure is a correctness or privacy
-incident rather than a visible bug. Coverage for its own sake was never the goal here, and
-chasing it would have spent time the decisions log needed more.
+Not coverage — a short list of places where a silent failure is a correctness, privacy or
+money incident rather than a visible bug:
 
-The runner is Node's built-in one with a 25-line resolver hook, because the alternative was
+| What | Why it is tested |
+| --- | --- |
+| The anonymizer round trip | A miss sends a real name to a vendor; a bad restore shows the user a placeholder |
+| `resolveCitations` | The rule that decides which claimed sources survive |
+| `askQuestion` | The guard as the user meets it: the refusal, the one retry, and the anonymizer wrapped around a stubbed model call |
+| The prompt envelope | That a source cannot forge the boundary between data and instructions |
+| PDF extraction | Against the seed PDF itself, the file whose layout produced the defect |
+| The `gateway` provider | Against a stub gateway: the route, the bearer credential, the request, the parsing |
+| `consumeAskQuota` | The ceiling on what one session can spend |
+
+Two seams make this possible without a database, a key or a model. `askQuestion` takes its
+retrieval and its model call as a defaulted parameter, so a stub can produce the one thing no
+provider here will produce on demand — a citation to a source it was never given. And the
+gateway test starts a local HTTP server that speaks the Anthropic wire format, so the request
+the app builds can be read back field by field.
+
+The runner is Node's built-in one with a small resolver hook, because the alternative was
 either a test framework or reshaping the application's import style to suit a runner.
 
 ---
@@ -594,31 +646,43 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
    JSON to be parsed out of the text. That branch is verified by construction, by typecheck
    against the current SDK, and by a startup check that refuses a keyless configuration — but
    unexercised is unexercised, and it is the first thing to run with a vendor key in hand.
-2. **The `gateway` provider is configured but never pointed at a real gateway.** Its call
-   path *is* exercised, because `openrouter` is the same path with the address filled in;
-   what is untested is the generic form's own base-URL-plus-`Authorization: Bearer`
-   construction, written against the common case where the gateway is Anthropic-API-compatible
-   (LiteLLM, Azure API Management and similar all are). A proxy with its own wire format would
-   be a different file implementing the same interface — which is the point, but it is an
-   untested point.
-3. **The citation guard's rejection branch is unreached in practice.** The
-   *"no relevant sources"* refusal is reachable and demoed, but the branch that fires when a
-   model cites outside the set it was given cannot be triggered by the mock, which never does
-   that. It is covered by unit tests over `resolveCitations`, not end to end.
+2. **The `gateway` provider has been read, not deployed.** Its request is now pinned down by
+   a test against a stub that speaks the Anthropic wire format: the route, the
+   `Authorization: Bearer` credential, the model id, the absence of a vendor `x-api-key`, the
+   prompt, and the parsing of a reply that arrives as prose around JSON. What no test here can
+   supply is a real corporate gateway's own behaviour — its auth scheme, its error shapes, its
+   idea of which API features it fronts. The file is written for the common case where the
+   gateway is Anthropic-API-compatible (LiteLLM, Azure API Management and similar all are); a
+   proxy with its own wire format would be a different file implementing the same interface,
+   which is the point, but it remains a point made in a test rather than in production.
+3. **Prompt-level injection defences are mitigation, not proof.** The envelope stops a source
+   forging the boundary, and the citation guard stops a successful injection from citing
+   anything outside your own corpus — but nothing here stops a model from *choosing* to follow
+   an instruction written inside a source it was legitimately given. The residual outcome is a
+   wrong answer carrying a real citation, and no detector in the app would catch it. That is
+   why the seed corpus is synthetic and the defence is structural: the honest claim is a
+   narrowed attack surface, not immunity.
 4. **Anonymization runs on the answering path only.** It is not applied at ingest, and it is
    not applied to filenames. Uploading a document named `notes-about-marek-dvorak.md` puts
    that name in the UI and in the source link. Deliberate — ingest-time redaction would make
    every stored document permanently lossy — but it is a real gap.
-5. **PDF extraction occasionally splits a word across a line break**, producing
-   `"configur ation"` in an answer. Cosmetic; it affects readability, never the citation.
+5. **PDF reflow reads the page layout, and a layout can lie.** Words split across a line by
+   the page layout (`"compar\ning"`) are rejoined by comparing each line's right edge with the
+   page's margin, which is what the layout itself used to decide the break. Two cases it
+   cannot get right: a document whose own line happens to end exactly at the margin loses that
+   line break, and a hyphen at a break is kept rather than resolved, because no dictionary
+   here can tell `"self-\nhosted"` from a word that simply ends in one.
 6. **No pagination anywhere.** The documents list and retrieval both assume a personal-scale
    corpus. At a few thousand documents the list page would need it.
 7. **The mock answerer cannot synthesise.** It extracts sentences. A question whose answer is
    spread across three notes gets the single closest passage, not a summary. Set
    `LLM_PROVIDER=openrouter` (or `anthropic`) for real synthesis.
-8. **No rate limiting on `/api/ask`.** A signed-in user can spend money in a loop. In a real
-   deployment this belongs at the gateway, which is one of the reasons corporate gateways
-   exist — but saying so is not the same as having it.
+8. **The rate limit is per instance and forgets on restart.** `ASK_RATE_LIMIT_PER_MINUTE`
+   bounds what one signed-in user can spend in a loop, counted in the app's own memory. Two
+   replicas therefore mean twice the limit, and a restart forgives everyone — the safe
+   direction to be wrong in for a spend ceiling, but a real limitation. The control belongs at
+   the gateway that already sees every call and holds the budget; this is the honest in-app
+   approximation of it, not a replacement.
 9. **`users.role_snapshot` can go stale.** It is refreshed at sign-in and used only for
    display and the admin count. Authorization never reads it, so a stale value is cosmetic —
    but anyone reading the schema should know it is there and why it is not authoritative.
@@ -633,7 +697,8 @@ In this order, and for these reasons:
 2. **A better retriever.** Vector search alone misses exact-token queries — part numbers,
    error codes, `ddr5-6000`. Hybrid search (BM25 alongside vectors, fused) would fix a class
    of miss the current design cannot, and the seed corpus already shows it.
-3. **Rate limiting and a per-user spend cap**, using the audit table that already exists.
+3. **A per-user spend cap**, using the audit table that already exists. The per-minute rate
+   limit bounds the pace of spending, not its total.
 4. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
    honestly described. A NER model would raise precision above 50% without changing a single
    call site — the seam is already there.
