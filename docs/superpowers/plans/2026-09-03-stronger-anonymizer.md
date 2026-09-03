@@ -561,7 +561,7 @@ with:
   const redactedQuestion = await anonymizer.redact(question);
   // Sequential, and measured: batching the chunks into one model call was
   // slower than this, because the pipeline pads every input to the longest.
-  const chunks = [];
+  const chunks: AnswerInput["chunks"] = [];
   for (const chunk of retrieved) {
     chunks.push({
       id: chunk.id,
@@ -571,6 +571,8 @@ with:
   }
   const input = { question: redactedQuestion, chunks };
 ```
+
+`AnswerInput` is already imported as a type at `answer.ts:3`, so the annotation costs no new import. It is annotated rather than inferred because an unannotated `[]` is an evolving `any[]`, which this project's `strict` settings may reject.
 
 Task 4 replaces `createHeuristicDetector()` with the factory. It is written out here so this task leaves the app working and its behaviour identical.
 
@@ -786,7 +788,7 @@ describe("ner detector windowing", () => {
     );
   });
 
-  it("drops nothing: every character of the text appears in some window", () => {
+  it("keeps a name that sits in a later paragraph", () => {
     const text = "First paragraph.\n\nSecond paragraph mentioning Lucie Šimková.";
 
     assert.ok(windows(text).some((w) => w.includes("Lucie Šimková")));
@@ -1236,9 +1238,10 @@ with:
 
 - [ ] **Step 7: Load the model at startup**
 
-In `src/instrumentation.node.ts`, add the import:
+In `src/instrumentation.node.ts`, add two imports:
 
 ```ts
+import { env } from "@/server/env";
 import { getPersonDetector } from "@/server/privacy/detectors";
 ```
 
@@ -1253,7 +1256,10 @@ try {
   await getPersonDetector().warmUp();
 } catch (error) {
   logger.error(
-    { err: error, provider: process.env.ANONYMIZER_PROVIDER },
+    // The effective value, not `process.env` — the variable is defaulted by
+    // zod, so the raw environment reads undefined in the common case and would
+    // name nothing at the one moment an operator needs it named.
+    { err: error, provider: env.ANONYMIZER_PROVIDER },
     "startup failed: could not load the person detector",
   );
   throw error;
