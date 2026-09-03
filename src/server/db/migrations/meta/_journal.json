@@ -50,6 +50,13 @@
       "when": 1788438036509,
       "tag": "0006_chunks_fts_english",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788452632215,
+      "tag": "0007_deployment_spend",
+      "breakpoints": true
     }
   ]
 }
