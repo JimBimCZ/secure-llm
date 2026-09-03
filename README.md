@@ -71,8 +71,8 @@ it, is worse than one that will not boot.
 
 ## What to try
 
-Ten things, each demonstrating one of the commitments above. Items 1–2 and 4–8 were run
-against a fresh `git clone` before this README was written; items 3, 9 and 10 against the same
+Eleven things, each demonstrating one of the commitments above. Items 1–2 and 4–8 were run
+against a fresh `git clone` before this README was written; items 3 and 9–11 against the same
 stack, with the corpus already loaded.
 
 1. **A cited answer.** Ask *"How should I size a power supply for a high-end GPU build?"*
@@ -134,6 +134,15 @@ stack, with the corpus already loaded.
     limit."**, the server logs `{"outcome":"daily_limit_reached"}`, and **no `llm_calls` row
     is written** — the ceiling is checked before the model is reached. Set `window_start` back
     a day and restart to watch the purge log `{"table":"user_spend","purged":1}`.
+11. **The embedder swap the app tells you about.** Set `EMBEDDING_PROVIDER=mock` and restart.
+    `/ask` and `/documents` now carry a notice: *"None of your documents can be searched right
+    now — 53 chunks in 10 documents indexed with `Xenova/all-MiniLM-L6-v2`. Retrieval now uses
+    `mock-hashing-v1`."* Ask item 1's question and it refuses, **with the reason on screen**
+    instead of alone. Press **Re-embed these documents**: the server logs
+    `{"documents":10,"chunks":53,"failed":0,"durationMs":301,"msg":"re-embedded stale
+    documents"}`, the notice disappears and the same question answers again. Set the variable
+    back, restart, and the notice returns pointing the other way — re-embed once more and the
+    corpus is exactly as it started.
 
 Two of these depend on the mock answerer picking particular sentences. With a real model
 (`LLM_PROVIDER=openrouter` or `anthropic`) the answers are better written — item 5 comes back
@@ -219,6 +228,30 @@ baked into the image, so `docker compose up` gives real semantic retrieval.
 Vectors from different models are not comparable, so every chunk records the
 `embedding_model` that produced it and retrieval filters on the active one. Changing the
 embedder degrades to "no results", never to silently wrong rankings.
+
+### Changing the embedder, and being told about it
+
+That degradation is correct on its own terms and, left silent, dishonest. Every question
+refuses while the documents page goes on reporting ten documents and fifty-three chunks: the
+index is unreachable, not empty, and nothing said so.
+
+So the mismatch is visible. `/ask` and `/documents` carry a notice whenever the signed-in
+user holds chunks the active model did not produce — how many, in how many documents, under
+which model id — and a button that rebuilds them. It renders nothing at all when nothing is
+stale; a warning that appears when there is nothing to say trains people to ignore it. It is
+on `/ask` in particular because that is where the symptom shows up: an unexplained refusal is
+indistinguishable from a corpus that genuinely does not cover the question.
+
+Re-embedding reads each document's **stored text**, splits it again for the model now in
+force and indexes it, one transaction per document. It re-chunks rather than replaying the
+stored chunks because chunk size is dictated by the model's input window (below): replaying
+the old boundaries would carry the old model's constraint into the new model's index.
+Measured on the seed corpus, 53 chunks across 10 documents: **8.8 s** with `local` (including
+a 0.5 s model load), **0.3 s** with `mock`.
+
+Nothing re-embeds automatically. Rewriting every index because an environment variable
+changed is exactly the invisible action a mistyped variable would make expensive — the app
+says what it cannot see and waits to be told.
 
 ### Chunking is dictated by the model, not by taste
 
@@ -666,8 +699,12 @@ classification would move up.
 ## Configuration
 
 Every variable is declared in one place (`src/server/env.ts`), validated with zod at startup,
-and present in `.env.example`. Blank values are treated as unset, so an unset variable falls
-back to its default rather than failing validation on an empty string.
+present in `.env.example`, **and passed into the container by `docker-compose.yaml`**. That
+last one is not bookkeeping: a variable that reaches the schema but not the compose file is
+one you can set and watch do nothing, which is how `ASK_RATE_LIMIT_PER_MINUTE` and
+`ASK_DAILY_CALL_LIMIT` spent a slice each silently pinned to their defaults in Docker. Blank
+values are treated as unset, so an unset variable falls back to its default rather than
+failing validation on an empty string.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -681,7 +718,7 @@ back to its default rather than failing validation on an empty string.
 | `OIDC_ROLES_CLAIM` | `roles` | Which claim carries roles |
 | `OIDC_INTERNAL_ORIGIN` | unset | Container-network address of the IdP. Unset for a public IdP |
 | `EMBEDDING_PROVIDER` | `local` | `local` \| `mock` |
-| `EMBEDDING_MODEL` | `Xenova/all-MiniLM-L6-v2` | Recorded on every chunk |
+| `EMBEDDING_MODEL` | `Xenova/all-MiniLM-L6-v2` | Recorded on every chunk. Changing this, or the provider, makes existing chunks unsearchable until they are re-embedded — the app says so and offers the rebuild |
 | `EMBEDDING_CACHE_DIR` | `./.models` | Where the baked-in model lives |
 | `LLM_PROVIDER` | `mock` | `anthropic` \| `openrouter` \| `gateway` \| `mock` |
 | `LLM_MODEL` | `claude-opus-5` | Model id **in the selected provider's namespace**; never hard-coded at a call site |
@@ -722,7 +759,7 @@ src/
     rateLimit.ts          per-user quota on the one endpoint that costs money
     spend.ts              the daily ceiling on that same endpoint
     rag/                  chunk · extract · ingest · retrieve · fuse · tokens
-                          · answer · citations
+                          · answer · citations · embeddingStatus · reembed
     retention/purge.ts
     db/                   schema + migrations, applied on startup
     log/                  logger.ts, llmAudit.ts
@@ -734,7 +771,7 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 86 tests, node --test, no test framework
+npm test          # 92 tests, node --test, no test framework
 npm run typecheck
 ```
 
@@ -753,6 +790,7 @@ money incident rather than a visible bug:
 | `spendDecision` | The daily ceiling's boundary: the call that is allowed and the one that is not |
 | `distinctiveTokens` | It decides whether the lexical arm runs at all — return the wrong thing and the refusal path changes |
 | `fuseByRank` | That fusion only ORDERS: an empty result stays empty, and a lexical-only chunk is never dropped |
+| `describeStaleness` | Whether the app notices that its own index has gone unreachable — the one failure that is invisible from the inside |
 
 Two seams make this possible without a database, a key or a model. `askQuestion` takes its
 retrieval and its model call as a defaulted parameter, so a stub can produce the one thing no
@@ -809,7 +847,8 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
    line break, and a hyphen at a break is kept rather than resolved, because no dictionary
    here can tell `"self-\nhosted"` from a word that simply ends in one. And it only applies
    at ingest — a document indexed before this change keeps its split words, invisible to
-   retrieval, until it is uploaded again. (Checked in the running app by ingesting the seed
+   retrieval, until it is uploaded again. Re-embedding does not rescue it either: that
+   replays the stored text rather than re-reading the file (gap 15). (Checked in the running app by ingesting the seed
    PDF twice: the older copy still reads `they a\nre`, `compar\ning`, `NV\nMe` and
    `configur\nation`; the newer one, none of them.)
 6. **No pagination anywhere.** The documents list and retrieval both assume a personal-scale
@@ -855,6 +894,20 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     the per-minute limit rather than by the daily one. The window is small and the per-minute
     limit covers it; closing it properly means counting before the call and reconciling after,
     which is more machinery than the exposure justifies.
+15. **Re-embedding replays stored text; it does not re-extract.** The input is
+    `documents.content`, the text as the extractor read it at upload — so a document ingested
+    before a change to extraction keeps whatever that extractor produced, and the PDF
+    line-break repair of gap 5 still reaches only documents uploaded after it. The name
+    invites the wrong expectation, which is why both gaps say so.
+16. **Re-embedding runs inside the request, with no progress and no queue.** 8.8 s for the
+    seed corpus; a corpus ten times the size is a request nobody wants to hold open. It is
+    idempotent per document — a rebuilt document is no longer stale, so it is not selected
+    again — so the recovery from a timeout is to press it again, which is the honest
+    minimum and not a substitute for a job runner. Same personal-scale assumption as gap 6.
+17. **The mismatch is announced in the UI only, per user.** An operator who changes the
+    variable and never signs in sees nothing: there is no startup check, no log line and no
+    way to re-embed on behalf of everyone. For a single-user knowledge base that is the whole
+    population, and for anything larger it is the first thing to add.
 
 ## What I would build next
 
@@ -874,8 +927,6 @@ In this order, and for these reasons:
 4. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
    honestly described. A NER model would raise precision above 50% without changing a single
    call site — the seam is already there.
-5. **Re-embedding on model change.** Today, changing the embedder makes old chunks invisible
-   and the app says nothing. It should detect the mismatch and offer to re-embed.
-6. **Streaming answers.** Currently the user waits for the whole response. The citation guard
+5. **Streaming answers.** Currently the user waits for the whole response. The citation guard
    has to run on a complete answer, so this needs care: stream the text, hold the sources
    until the guard has passed.

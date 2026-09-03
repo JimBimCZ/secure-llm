@@ -5,6 +5,7 @@ import { auth } from "@/server/auth/config";
 import { db } from "@/server/db";
 import { chunks, documents } from "@/server/db/schema";
 
+import { EmbeddingNotice } from "../embedding-notice";
 import { DocumentActions } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -40,6 +41,8 @@ export default async function DocumentsPage() {
         {rows.reduce((sum, r) => sum + r.chunkCount, 0)} chunks. Accepted
         formats: .md, .txt, .pdf.
       </p>
+
+      <EmbeddingNotice ownerSub={session.sub} />
 
       <DocumentActions />
 
