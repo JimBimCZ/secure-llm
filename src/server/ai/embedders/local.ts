@@ -2,6 +2,7 @@ import type { FeatureExtractionPipeline } from "@huggingface/transformers";
 
 import { EMBEDDING_DIMENSIONS, type EmbeddingProvider } from "@/server/ai/types";
 import { env } from "@/server/env";
+import { transformers } from "@/server/models";
 import { logger } from "@/server/log/logger";
 
 /**
@@ -19,13 +20,9 @@ async function getPipeline(): Promise<FeatureExtractionPipeline> {
   if (pipelinePromise) return pipelinePromise;
 
   pipelinePromise = (async () => {
-    const { pipeline, env: hfEnv } = await import("@huggingface/transformers");
-
-    hfEnv.cacheDir = env.EMBEDDING_CACHE_DIR;
-    hfEnv.localModelPath = env.EMBEDDING_CACHE_DIR;
-    // If the model is missing, fail loudly at startup rather than silently
-    // reaching out to the internet from a container that should not have any.
-    hfEnv.allowRemoteModels = false;
+    // Configured in one place, because those settings are process-global and
+    // the person detector loads a second model through the same library.
+    const { pipeline } = await transformers();
 
     const startedAt = Date.now();
     const extractor = await pipeline("feature-extraction", env.EMBEDDING_MODEL, {

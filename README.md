@@ -229,6 +229,12 @@ the first.
 Nothing outside `src/server/ai/providers/` knows about HTTP, headers or vendor JSON. Model
 ids come from the environment, never from a call site.
 
+There is a third interface in the project — `PersonDetector`, which decides how the anonymizer
+finds names — and it is deliberately **not** in this table. Both of its implementations run
+in-process; this table is about the seams across which text leaves the app, and blurring that
+would cost the privacy argument the one distinction it rests on. See
+[the detector section](#what-the-detector-actually-does-measured).
+
 ### Answering: three routes and a mock
 
 - **`anthropic`** — the vendor's API directly, through the official SDK.
@@ -542,6 +548,7 @@ as markup or a link the page will follow.
 | Answering | Claude Opus 5 | `claude-opus-5` (vendor) / `anthropic/claude-opus-5` (OpenRouter) | Anthropic API or OpenRouter, via `@anthropic-ai/sdk` 0.120.0 |
 | Answering, as actually exercised | GPT-4o mini | `openai/gpt-4o-mini` | OpenRouter, via the same client |
 | Embedding | all-MiniLM-L6-v2 | `Xenova/all-MiniLM-L6-v2`, `q8` weights, 384 dims | in-process, in the container |
+| Person detection, for anonymization | distilbert-base-multilingual-cased-ner-hrl | `Xenova/distilbert-base-multilingual-cased-ner-hrl`, `q8` weights, `PER` tags only | in-process, in the container |
 
 The second row is the honest one, and it is worth a sentence. The live run of the answering
 path was made through OpenRouter against **an OpenAI model**, using the Anthropic SDK, with
@@ -554,7 +561,11 @@ routes to the same model would have been.
 
 The `q8` (8-bit) weights are used rather than float32: 23 MB in the image instead of 96 MB,
 identical 384 dimensions, and measured separation held (related pair 0.339 vs unrelated
-−0.015).
+−0.015). The detector's weights are `q8` for the same reason and measure 132 MB — see
+[the detector section](#what-the-detector-actually-does-measured) for what that buys.
+
+Both models run **in-process**, and neither is a call that leaves the app. Only the answering
+step crosses a network boundary, and the text it carries has been through the anonymizer first.
 
 **There is no speech-to-text**, because nothing here needs it. Were it added, it would be a
 third interface beside the two above, selected by its own environment variable, for exactly
@@ -709,33 +720,95 @@ for what the user actually asked about.
 
 ### What the detector actually does, measured
 
-It is regexes plus a name dictionary plus a capitalised-bigram heuristic, and it is meant to
-be read in one sitting and argued with. A naive detector whose limits are written down beats
-a black box whose limits are not. Measured against the full seed corpus:
+E-mails and phone numbers are two regexes, and they always have been. **Person names are a
+seam**: one `PersonDetector` interface, two implementations, selected by
+`ANONYMIZER_PROVIDER`.
 
-| | Detected | Leaked |
+- **`ner` — the default.** `Xenova/distilbert-base-multilingual-cased-ner-hrl` (`q8` weights)
+  running in-process in the container, baked into the image, never reaching the network. It
+  keeps the name dictionary too: a name someone has already told the app about is a certainty,
+  not a guess. The model is what replaced the guessing.
+- **`heuristic`** — the detector this project shipped with, with one behavioural change,
+  documented in `heuristic.ts`: both passes now run over the same original text, so an unlisted
+  first name beside a known surname is redacted whole. Otherwise the same dictionary, plus a
+  capitalised-bigram guess and a sentence-starter list. No model. It is what the tests use and
+  what a build without the NER weights must be configured to use.
+
+Measured against the full seed corpus, through the app's own detector:
+
+| | `heuristic` (before) | `ner` (default) |
 | --- | --- | --- |
-| People | 6 / 6 | 0 |
-| E-mail addresses | 6 / 6 | 0 |
-| Phone numbers | 3 / 3 | 0 |
+| People, distinct | 6 / 6 | 6 / 6 |
+| People, occurrences replaced | 10 / 10 | 10 / 10 |
+| False positives | 6 | 0 |
+| Person precision | 50% | 100% |
+| E-mail addresses | 6 / 6 | 6 / 6 |
+| Phone numbers | 3 / 3 | 3 / 3 |
 
-Round trip is byte-identical. There are **6 false positives** — `Arrow Lake`, `Curve
-Optimizer`, `Adaptive-Sync`, `Ultra High`, `Display Stream`, `Wi-Fi` — so **precision on
-person detection is 50%** while recall on the values that matter is 100%.
+The last two rows are identical in both columns because they are the same two regexes; the
+detector seam does not touch them. Round trip is byte-identical either way.
 
-That bias is deliberate. A false positive means the model reasons over an opaque token and
-`restore()` puts the real text back, so **the user never sees a difference**. A false negative
-is a leak. The detector is tuned to over-redact.
+**Recall is not what improved.** The `heuristic` detector replaced all ten person occurrences
+too, by construction: a detected value is replaced with `split`/`join` across the whole text,
+so finding a name once finds it everywhere. Nothing in this change catches a name the old
+detector leaked, on this corpus. What changed is **precision, from 50% to 100%**, and that is
+the whole of the win.
+
+The **6 false positives** are the `heuristic` column's, and were the app's behaviour until
+this slice: `Arrow Lake`, `Curve Optimizer`, `Adaptive-Sync`, `Ultra High`, `Display Stream`,
+`Wi-Fi`. Counted as replacements rather than as distinct values, `heuristic` made **25** across
+the corpus: the 10 real person occurrences plus 15 occurrences of those six non-people. `ner`
+makes 10, and every one of them is a person.
+
+The old defence still stands, and now describes the `heuristic` provider: a false positive
+means the model reasons over an opaque token and `restore()` puts the real text back, so **the
+user never sees a difference**, while a false negative is a leak — over-redaction is the safe
+direction. A naive detector whose limits are written down still beats a black box whose limits
+are not, and that argument is why `heuristic` remains a supported configuration rather than
+deleted code. It is simply no longer what the app does by default.
+
+**What the model costs**, measured:
+
+- **Model payload: 132 MB.** `.models` in the image holds **155 MB** — 23 MB of embedder,
+  unchanged, and 132 MB of NER model. The whole image is **496 MB**. By parameter count,
+  roughly three quarters of the increase is the multilingual vocabulary that makes the Czech
+  names work; the rest is the wider encoder, 768 dimensions against MiniLM's 384.
+- **Startup: the model loads eagerly, after migrations,** logged with the model id and the load
+  time (measured at 2,902 ms), against a 40 s healthcheck start period, so a missing or
+  misnamed model stops the deployment instead of failing every question. **It loads twice, not
+  once** (gap 35): the warm-up at startup and the first question's own call to
+  `getPersonDetector()` land in different Next.js server entries that do not share `ner.ts`'s
+  module-level cache, so the first question pays the full load cost again. The narrower claim
+  still holds: a detector that cannot load throws, and `redact` throwing means no text leaves
+  the process, so eager loading prevents no leak — it changes *who finds out*, the healthcheck
+  or a user — but "one model load" is not what this build does.
+- **Per question: this app does not measure it, and does not claim a number.** The audit log
+  times the LLM call, not detection, and no field anywhere isolates the detector's share of a
+  request. What was measured is the corpus level: the whole seed corpus takes **7,896 ms**
+  through `ner`, including one cold model load, against **8 ms** through `heuristic` — measured
+  in the builder-stage image (`docker build --target builder`), where the real source and the
+  baked model are both in the path, not in the running container. Detection
+  is real in-process work now rather than approximately free, and how much of one question's
+  wall clock it accounts for is not something this build reports.
 
 **Known limits, all of them deliberate:**
 
-- It cannot tell a person from any other two-word proper noun.
-- A single unknown first name on its own ("ask Petra") is missed unless it is in the dictionary.
-- Addresses, dates of birth, national ID and account numbers are **not detected at all**.
-- The dictionary is a constant here because the corpus is synthetic and eight names is the
-  whole population. In a real deployment it would come from wherever the organisation already
-  keeps its people — a directory export, an HR system — refreshed on a schedule. The
-  anonymizer takes the list; it does not own it.
+- **`ner`:** the model's ten training languages do not include Czech. It finds every Czech name
+  in this corpus, measured — and the other candidate, trained on the same ten, did not
+  (gap 30).
+- **`ner`:** only `PER` is used. The model also emits `ORG` and `LOC`, and neither is wired up.
+- **`ner`:** the pipeline exposes no character offsets, so a name is stitched back together
+  from wordpieces and then located in the text as a string. A stitched form that is not in the
+  text replaces nothing — a miss, never a corruption (gap 31).
+- **`heuristic`:** it cannot tell a person from any other two-word proper noun, and a single
+  unknown first name on its own ("ask Petra") is missed unless it is in the dictionary. Those
+  two limits are the 50% column.
+- **Neither:** addresses, dates of birth, national ID and account numbers are **not detected at
+  all**.
+- The dictionary belongs to both detectors, and is a constant here because the corpus is
+  synthetic and eight names is the whole population. In a real deployment it would come from
+  wherever the organisation already keeps its people — a directory export, an HR system —
+  refreshed on a schedule. The anonymizer takes the list; it does not own it.
 
 ### The LLM call log
 
@@ -924,6 +997,13 @@ one you can set and watch do nothing, which is how `ASK_RATE_LIMIT_PER_MINUTE` a
 values are treated as unset, so an unset variable falls back to its default rather than
 failing validation on an empty string.
 
+`MODEL_CACHE_DIR` was `EMBEDDING_CACHE_DIR` until the person detector arrived and made that
+name wrong: `@huggingface/transformers` reads the cache directory as process-global state, so
+with two models in one process the variable named for embeddings was configuring the anonymizer
+too. An existing `.env` still carrying the old name keeps working — the old variable is ignored
+and the new one falls back to the same `./.models` default. A deployment that had pointed the
+old variable somewhere other than the default has to rename it.
+
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `DATABASE_URL` | — | Postgres connection string |
@@ -937,7 +1017,9 @@ failing validation on an empty string.
 | `OIDC_INTERNAL_ORIGIN` | unset | Container-network address of the IdP. Unset for a public IdP |
 | `EMBEDDING_PROVIDER` | `local` | `local` \| `mock` |
 | `EMBEDDING_MODEL` | `Xenova/all-MiniLM-L6-v2` | Recorded on every chunk. Changing this, or the provider, makes existing chunks unsearchable until they are re-embedded — the app says so and offers the rebuild |
-| `EMBEDDING_CACHE_DIR` | `./.models` | Where the baked-in model lives |
+| `MODEL_CACHE_DIR` | `./.models` | Where the baked-in models live — both of them |
+| `ANONYMIZER_PROVIDER` | `ner` | `ner` \| `heuristic`. Which person detector the anonymizer takes. No fallback: if `ner` is selected and its model is not in the image, the app refuses to start rather than quietly redacting less |
+| `ANONYMIZER_MODEL` | `Xenova/distilbert-base-multilingual-cased-ner-hrl` | The NER model that finds person names, in env and never at a call site — the rule `LLM_MODEL` and `EMBEDDING_MODEL` already follow |
 | `LLM_PROVIDER` | `mock` | `anthropic` \| `openrouter` \| `gateway` \| `mock` |
 | `LLM_MODEL` | `claude-opus-5` | Model id **in the selected provider's namespace**; never hard-coded at a call site |
 | `LLM_TIMEOUT_MS` | `60000` | Deadline for one call. The request is **aborted**, not abandoned |
@@ -974,7 +1056,10 @@ src/
       call.ts             the ONLY door out of the process: timeout + audit
       providers/          anthropic · openrouter · gateway · mock  (answering)
       embedders/          local · mock                 (embedding)
-    privacy/anonymizer.ts
+    models.ts             the one place that configures @huggingface/transformers
+    privacy/
+      anonymizer.ts       placeholders, the per-request mapping, restore
+      detectors/          types · dictionary · heuristic · ner   (person names)
     rateLimit.ts          per-user quota on the one endpoint that costs money
     spend.ts              two counted ceilings, per user and deployment-wide, reserved before each call
     rag/                  chunk · extract · ingest · retrieve · bm25 · fuse
@@ -990,7 +1075,7 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 106 tests, node --test, no test framework
+npm test          # 125 tests, node --test, no test framework
 npm run typecheck
 ```
 
@@ -1000,6 +1085,7 @@ money incident rather than a visible bug:
 | What | Why it is tested |
 | --- | --- |
 | The anonymizer round trip | A miss sends a real name to a vendor; a bad restore shows the user a placeholder |
+| `windows` and `personsIn` | The code around the NER model: windowing is what stops the model silently truncating a name out of existence, and `personsIn` is the wordpiece stitching. The model call itself is not tested (gap 34) |
 | `resolveCitations` | The rule that decides which claimed sources survive |
 | `askQuestion` | The guard as the user meets it: the refusal, the one retry, and the anonymizer wrapped around a stubbed model call |
 | The prompt envelope | That a source cannot forge the boundary between data and instructions |
@@ -1249,6 +1335,52 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     concurrent requests against a ceiling of 5 leave the counter at exactly
     5. The residual risk is plain: a future edit to that SQL can break the
     ceiling, and only another manual pass would catch it.
+30. **The detector model's ten training languages do not include Czech,** and this corpus is
+    largely Czech names. It finds every one of them, measured — and the other candidate,
+    trained on the same ten languages, did not: it missed `Radek Pokorný` and stitched the
+    pieces of it into `Poný`, a string that appears nowhere in the corpus. Nothing on either
+    model card would have said which of the two would cope. Working here is evidence, not a
+    guarantee, and a corpus in a language further from those ten needs its own measurement
+    before anyone relies on this.
+31. **Reconstruction can miss, and the honest bound is "never corrupts".** The pipeline exposes
+    no character offsets, so a detected name is stitched back out of wordpieces and then found
+    in the text as a string. A stitched surface form that is absent from its window is dropped,
+    silently — no error, no log line, nothing in the UI. That is by design preferable to
+    splicing at a guessed offset, which would corrupt the text the model reads, but the
+    guarantee is only that a failure loses a redaction rather than mangling a document. On this
+    corpus all ten reconstructions were present verbatim.
+32. **`PER` only.** The model also emits `ORG` and `LOC`; neither is used, because neither is
+    what the requirement asks for. Addresses, dates of birth, national ID and account numbers
+    remain undetected, exactly as the detector section's known limits already say.
+33. **The image grew by 132 MB** — `.models` went from 23 MB to 155 MB, and the whole image is
+    496 MB. By parameter count, roughly three quarters of the increase is the multilingual
+    vocabulary that makes the Czech names work; the rest is the wider encoder. A single-language
+    model such as `distilbert-base-cased` (same 768/6/3072 shape, ~65M parameters) would be
+    roughly half the size and would not do this job.
+34. **No automated test covers the model call itself.** `windows` and `personsIn` — the
+    windowing that prevents silent truncation, and the wordpiece stitching — are pure functions
+    in this project's own source and are tested. The pipeline they feed is not: the suite loads
+    no model for the same reason it opens no database connection, because a test that does can
+    pass for the wrong reason, and a TypeScript reimplementation of the model's behaviour would
+    test the copy. Same admission as gaps 23 and 29, and the controlling verification is the
+    same shape: a measured pass against the running stack, recorded in the detector section
+    above. The residual risk is plain — a future change to the model, the dtype or the
+    stitching can degrade detection, and only another manual pass would catch it.
+35. **The eager warm-up does not warm the instance the request path uses, so the model loads
+    twice, not once.** `instrumentation.node.ts` calls `getPersonDetector().warmUp()` at
+    startup; `rag/answer.ts` calls `getPersonDetector()` again from the request path. Next.js
+    compiles `instrumentation` as a server entry distinct from the route-handler chunks, and the
+    module-level cache in `ner.ts` is not shared between them, so each holds its own model
+    instance. Measured against the running stack: the startup log shows one load, then the
+    first question after startup triggers a second, separately logged, load. The narrower
+    safety claim survives — a detector that cannot load throws at startup and stops the
+    deployment before any question reaches it — but the cost claim does not, and it is paid
+    twice over. In time: the first question still pays the full load again, on top of the one
+    startup already paid. In memory: the process holds **two** resident copies of a 132 MB
+    model rather than one, for the life of the container. Closing it means keying the cache on
+    `globalThis` instead of on the module, which is what makes a singleton survive Next.js
+    handing the same file to two entries — a small change, and one this project has not
+    measured, so it is written down here rather than made on the strength of an argument.
 
 ## What I would build next
 
@@ -1256,14 +1388,31 @@ In this order, and for these reasons:
 
 1. **Run the `anthropic` path end to end and re-measure.** Gap 1 above. Everything else is
    downstream of knowing the real path works.
-2. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
-   honestly described. A NER model would raise precision above 50% without changing a single
-   call site — the seam is already there.
-3. **Streaming answers.** Currently the user waits for the whole response. The citation guard
+2. **Streaming answers.** Currently the user waits for the whole response. The citation guard
    has to run on a complete answer, so this needs care: stream the text, hold the sources
    until the guard has passed.
 
-**The second item on this list, until this slice, was "a shared spend
+**The second item on this list, until this slice, was "a stronger anonymizer, behind the same
+interface."** It is now built — see
+[the detector section](#what-the-detector-actually-does-measured) — and it was wrong about two
+things, both worth correcting rather than quietly building past. It read: *"The current one is
+a regex detector honestly described. A NER model would raise precision above 50% without
+changing a single call site — the seam is already there."*
+
+**The seam was not already there.** `createAnonymizer()` took no argument and had exactly one
+implementation. The `PersonDetector` interface, the folder of detectors and the factory reading
+`ANONYMIZER_PROVIDER` are this slice's work, not a pre-existing hole a model was dropped into.
+The rest of that sentence held: no call site chose a detector before and none does now.
+
+**And "stronger" invites a reading the measurement does not support.** It sounds like catching
+names that were getting out. Measured, the old detector replaced all ten person occurrences in
+the corpus too — `split`/`join` means finding a name once finds it everywhere — so nothing was
+leaking and nothing stopped leaking. What improved is that the app no longer redacts six things
+that are not people: precision, 50% to 100%. The price is 132 MB of model in the image and a
+2.9 s load at startup, which is a real cost bought for a real but narrower win than the item
+promised.
+
+**Until the previous slice, the second item was "a shared spend
 ceiling."** It is now built, and what it cost is worth recording: the item read "and the
 reconciliation that gaps 13 and 14 describe", treating that as work attached to
 the ceiling. It was the ceiling's precondition. Gap 13's justification —
