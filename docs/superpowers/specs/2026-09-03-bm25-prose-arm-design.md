@@ -1,7 +1,8 @@
 # Slice 14 — a BM25 arm for prose
 
 **Date:** 2026-09-03
-**Status:** approved, not yet implemented
+**Status:** implemented — see §7, *Deviations, as built*, for the three points where the
+shipped arm differs from what is designed above
 **Requirement it serves:** CLAUDE.md §6 — the citation guarantee. The promise is that an
 answer without a source is never shipped. Its mirror-image failure is the one measured below:
 refusing to answer from a document the app has indexed, which the user cannot tell apart from
@@ -212,3 +213,49 @@ Written down now so it is not discovered later:
 | `test/bm25.test.ts`, `test/fuse.test.ts` | coverage arithmetic, N-way fusion |
 | `README.md` | retrieval section → three arms; gap 12 narrowed; roadmap item 2 closed and its precondition corrected; new gaps |
 | `docs/decisions.md` | one line per decision above |
+
+---
+
+## 7. Deviations, as built
+
+Three things in the design above did not survive contact with the measurement. Recorded here in
+the convention `docs/implementation-plan.md` uses, rather than edited into §3 as though they had
+always been the plan.
+
+**Deviation, as built (§3.1): `content_tsv_en` has NO GIN index.** The column ships as designed
+in every other respect. The index does not, because the arm has no use for one: BM25 needs
+corpus-wide statistics — `N`, `avgdl` and `df` — so §3.2's query reads every one of the owner's
+chunks whatever it does, and it never issues the `@@` match a GIN index exists to serve. An index
+would be storage and a write cost buying nothing measurable. `EXPLAIN (ANALYZE)` over the seed
+corpus puts the query at 7.3–7.9 ms, all buffers cached, down from the 19.9 ms §2 measured before
+the stored column existed. Written into the README as gap 21.
+
+**Deviation, as built (§3.3): admission is `coverage >= 0.5` AND at least two distinct matched
+query lexemes.** The second condition is not in the design. It was added after review found that
+coverage alone saturates, which the separation table in §2 could not show because every question
+in it is a full sentence. Coverage is a *share* — it divides by the question's own IDF mass, so
+that mass cancels and never reaches the test, and a question reducing to one content lexeme scores
+1.000 against every chunk containing it. Measured on the same corpus: `notes` admitted a full page
+of six rows with 31 of 53 chunks qualifying, `power` with 18 of 53, and *"what happened?"*, *"is it
+good?"* and *"what year is it?"* each did the same at coverage 1.000. That is not a ranking
+problem. §3.4's guarantee is that an empty retrieval is what produces "Not found in your knowledge
+base." before any model call, so a vacuous question would have reached the model and the refusal
+would have rested on the model obeying its prompt — the outcome §3.3 exists to prevent. Two
+distinct terms closes it, needs no new tunable, and is checked in the same SQL predicate as
+ownership. After the change all five short questions return nothing and none of the five questions
+this slice targets regressed. Consequence, written into the README as gap 20: a genuine
+single-content-word question now gets no prose arm at all and falls back to the vector arm alone.
+Any separation figure quoted from §2 must therefore be read as scoped to full-sentence questions,
+which is the population it was measured over.
+
+**Deviation, as built (§4, "On testing"): `bm25.ts` has no unit test.** §4 said the coverage
+arithmetic and term extraction would get unit tests. Neither exists as TypeScript to test: every
+branch of the rule — coverage, the term count, the admission predicate, the ordering — is inside
+the query, and the suite deliberately opens no database connection, which is precisely how slice
+13's `&&` operator-precedence bug reached the running stack past a green suite. A TypeScript
+reimplementation would test the copy rather than the query, and would have gone green in exactly
+that scenario. The controlling verification is therefore the measured pass against the running
+app that §4 already named as this slice's controlling evidence: the five recovered questions, the
+ten unchanged ones, and six refusals with the audit table not growing. The residual risk — a
+future edit to the SQL breaks retrieval, and only another manual pass catches it — is written into
+the README as gap 23.

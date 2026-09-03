@@ -71,8 +71,8 @@ it, is worse than one that will not boot.
 
 ## What to try
 
-Eleven things, each demonstrating one of the commitments above. Items 1–2 and 4–8 were run
-against a fresh `git clone` before this README was written; items 3 and 9–11 against the same
+Twelve things, each demonstrating one of the commitments above. Items 1–2 and 4–8 were run
+against a fresh `git clone` before this README was written; items 3 and 9–12 against the same
 stack, with the corpus already loaded.
 
 1. **A cited answer.** Ask *"How should I size a power supply for a high-end GPU build?"*
@@ -84,13 +84,14 @@ stack, with the corpus already loaded.
 3. **The part-number question vector search alone gets wrong.** Ask *"What are PL1 and PL2
    set to?"* The embedder scores the chunks that answer it at 0.054 and 0.063 — far under the
    0.25 floor — so vector search alone returns nothing and the app would refuse. The exact
-   match on `pl1`/`pl2` finds them, and the answer comes back cited. The server logs
-   `"lexicalHits":2`. Then ask *"What did I write about LGA 1718?"* — the same failure in the
-   two-token form, and the sharper one: the corpus defines that socket in as many words, and
-   the vector arm's best chunk scores **0.236** against the 0.25 floor, so the app used to
-   refuse. The pair `lga 1718` is searched for as a phrase, `"lexicalHits":2` again, and the
-   citation lands on the line that defines it.
-   See [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers).
+   match on `pl1`/`pl2` finds them, and the answer comes back cited. The server logs a non-zero
+   `lexicalHits` — the count of chunks some non-vector arm found, which was 2 when the identifier
+   arm was the only one of them and can now be higher, since the prose arm counts in the same
+   field. Then ask *"What did I write about LGA 1718?"* — the same failure in the two-token
+   form, and the sharper one: the corpus defines that socket in as many words, and the vector
+   arm's best chunk scores **0.236** against the 0.25 floor, so the app used to refuse. The
+   pair `lga 1718` is searched for as a phrase and the citation lands on the line that defines
+   it. See [Retrieval](#retrieval-three-arms-because-an-embedder-forgets-the-words).
 4. **Anonymization, outbound.** Ask *"What did Marek Dvorak say about the RAM kit?"* Expand
    **"N values redacted before this left the app"**: it shows the question exactly as it was
    sent — `What did [PERSON_1] say about the RAM kit?`
@@ -148,6 +149,13 @@ stack, with the corpus already loaded.
     documents"}`, the notice disappears and the same question answers again. Set the variable
     back, restart, and the notice returns pointing the other way — re-embed once more and the
     corpus is exactly as it started.
+12. **The prose question vector search alone got wrong.** Ask *"What is the arithmetic I
+    actually use for sizing?"* Before the prose arm this was refused: the best chunk scored
+    **0.173** against the 0.25 floor, from a document whose section is titled *"The arithmetic
+    I actually use"*. It now comes back answered and cited to `06-psu-sizing.md`, and the
+    audit table grows by exactly one row. The arm is narrow in the other direction too: asking
+    *"notes"* on its own admits **nothing** from it, because one word is not a question. See
+    [Retrieval](#retrieval-three-arms-because-an-embedder-forgets-the-words).
 
 Two of these depend on the mock answerer picking particular sentences. With a real model
 (`LLM_PROVIDER=openrouter` or `anthropic`) the answers are better written — item 5 comes back
@@ -163,11 +171,12 @@ are enforced by the app, not by the model.
 question
    │
    ├─ 1. embed the question in-process ─────────────► no network
-   ├─ 2. TWO SEARCHES, each filtering owner + embedding model in ONE SQL predicate
+   ├─ 2. THREE SEARCHES, each filtering owner + embedding model in ONE SQL predicate
    │       ├─ vector: everything over the score floor
-   │       ├─ lexical: only if the question holds a part number, and only exact matches
-   │       ├─ fuse the two rankings (reciprocal rank fusion)
-   │       └─ both empty? → "Not found in your knowledge base." (no model call)
+   │       ├─ identifier: only if the question holds a part number, and only exact matches
+   │       ├─ prose: BM25, admitted on IDF coverage ≥ 0.5 and ≥ 2 distinct query terms
+   │       ├─ fuse the three rankings (reciprocal rank fusion)
+   │       └─ all empty? → "Not found in your knowledge base." (no model call)
    ├─ 3. anonymize the question and every retrieved chunk ──► [PERSON_1], [EMAIL_1], [PHONE_1]
    ├─ 4. wrap each source in a <source> envelope it cannot write its way out of
    ├─ 5. one model call, through one wrapper that times out and writes the audit record
@@ -269,9 +278,14 @@ from 0.44 to 0.51.
 
 ---
 
-### Retrieval: two arms, because embeddings cannot see part numbers
+### Retrieval: three arms, because an embedder forgets the words
 
-A sentence model is good at meaning and bad at identifiers. `all-MiniLM-L6-v2` puts
+A sentence embedder compresses a passage to 384 dimensions and keeps its meaning. It throws two
+things away, and each one cost a measured false refusal against the seed corpus: it cannot tell
+one identifier from another, and it does not keep the words you wrote. So retrieval has a vector
+arm and two lexical arms, and the two lexical arms want opposite things from the tokenizer.
+
+**The identifier arm — because embeddings cannot see part numbers.** `all-MiniLM-L6-v2` puts
 `ddr5-6000` and `ddr5-5600` in nearly the same place — to the model they are the same kind of
 thing said about the same subject — which is exactly wrong when the question is which of the
 two to buy. Measured against the seed corpus, asking *"what are PL1 and PL2 set to?"* returned
@@ -279,9 +293,8 @@ two to buy. Measured against the seed corpus, asking *"what are PL1 and PL2 set 
 far below the 0.25 floor. The app said "Not found in your knowledge base." about a document it
 had indexed.
 
-So retrieval has a second arm. It runs **only** when the question contains something shaped
-like a part number, and it demands that every such term is present in the chunk. Two shapes
-count:
+This arm runs **only** when the question contains something shaped like a part number, and it
+demands that every such term is present in the chunk. Two shapes count:
 
 - **One token mixing letters and digits**, at least three characters: `ddr5-6000`, `B650E`,
   `PL2`. Prose does not look like this, and a bare `5600` is far more often a year, a price
@@ -299,12 +312,9 @@ in the chunk alike. A chunk reading *"LGA 1851 … 1700 pins"* does not match `l
 cannot make. For a one-word term a phrase query is identical to the AND query used before, so
 nothing about the existing behaviour moved.
 
-The two rankings are combined with reciprocal rank fusion, because a cosine similarity and a
-text rank are not on a scale that can be compared, while their ranks are.
-
 Measured on the same corpus, after:
 
-| Question | Vector arm | What the lexical arm added |
+| Question | Vector arm | What the identifier arm added |
 | --- | --- | --- |
 | *what are PL1 and PL2 set to?* | 0 hits — a false refusal | The 2 chunks that answer it, at 0.054 and 0.063 |
 | *what did I write about LGA 1718?* | 0 hits — a false refusal, top score 0.236 against a 0.25 floor | The 2 chunks naming the socket, one of them the line that defines it |
@@ -320,16 +330,137 @@ call. A broad keyword arm would answer nearly every question with *something*, a
 would come to rest on a similarity threshold invented for text ranks and tuned by feel. There
 is no such threshold here and no new environment variable: a chunk either contains the
 identifier or it does not. When the question holds no identifier — the common case — the arm
-does not run and retrieval is byte-identical to what it was before.
+does not run.
 
 The trade is that a chunk can now reach the model on an exact match alone, at a cosine the
 vector arm would have rejected. That is the intended behaviour — the match is the evidence —
 and the citation guard is still the backstop underneath it.
 
-The `content_tsv` column is `GENERATED ALWAYS … STORED`, so it cannot drift from the content it
-indexes and there is no write path to keep in step. Postgres computes it for existing rows when
-the column is added, so all 53 already-indexed chunks became searchable on the migration, with
-nothing re-uploaded.
+**The prose arm — because the embedder does not keep your wording.** The identifier arm never
+runs on an ordinary question, so until this slice every prose question was the vector arm's job
+alone. Fifteen prose questions the corpus answers were put to it. **Five were refused
+outright** — nothing cleared the 0.25 floor, so retrieval returned nothing and the app said
+"Not found in your knowledge base." without a model call. Two of the five are the clearest
+evidence in this project, because in both the user is half-remembering their own wording:
+
+| Question | Vector arm | BM25 over the same corpus |
+| --- | --- | --- |
+| *what mistakes have I already made once and want to avoid repeating?* | **0 hits**, best 0.238 | `01-cpu-notes#0` at rank 1 — the note opens *"the mistakes I've already made once and don't want to repeat"* |
+| *what is the arithmetic I actually use for sizing?* | **0 hits**, best 0.173 | `06-psu-sizing#0` at rank 1 — the section is titled *"The arithmetic I actually use"* |
+
+For a personal knowledge base that is not an edge case; it is the house style of the questions.
+The user is searching text they wrote themselves and partly remember.
+
+**A second tsvector, because the two lexical arms disagree about stemming.** The identifier arm's
+`content_tsv` uses the `simple` dictionary, which does no stemming — deliberately, since stemming
+a part number can only lose information. For prose that is precisely backwards: the term
+`underweight` matches **0 chunks** under `simple` and **2** under `english`, and for *"what did I
+underweight for years?"* the answering chunk — in a section titled *"Ergonomics, which I
+underweighted for years"* — moves from rank 7 to rank 1. So there is a second generated column,
+`chunks.content_tsv_en`, built with the `english` configuration. `content_tsv` is untouched.
+
+**BM25, computed in SQL, with no extension.** Postgres has no BM25. `ts_rank_cd` has term
+frequency and length normalisation but **no IDF** — no notion that *arithmetic* is rarer than
+*the* — and IDF is the whole of what makes a prose ranker work. So the score is computed from
+the stored tsvector: `tf` from the positions array, `df` counted across the owner's own chunks,
+`|d|` and `avgdl` from lexeme counts in that same scope, so one user's corpus can never influence
+another's ranking. `k1 = 1.2` and `b = 0.75` are **adopted from the BM25 literature, not tuned
+here** — that distinction is the reason they are defensible, and a number tuned until the demo
+looked good would not be. The two constants below are ours, and are not defensible that way.
+
+**Admission by IDF coverage and by term count, not by a score floor.** A BM25 score is unbounded
+and depends on the corpus it was computed over; a floor on it would be exactly the threshold
+invented for text ranks and tuned by feel that the identifier arm exists without, and the refusal
+path would come to rest on it. Coverage is a different kind of number: the share of the
+question's total IDF mass that a chunk accounts for. It is dimensionless, lies in [0, 1], and
+says something checkable — *this chunk accounts for at least half of what you actually asked
+about.* A query term the corpus never contains counts in the denominator at maximum IDF, so
+asking about Peru lowers coverage rather than being quietly ignored.
+
+Measured separation, **over full-sentence questions only** — that is the population it was
+measured over, and the paragraph after this one is what happens outside it:
+
+| | best coverage over the corpus |
+| --- | --- |
+| **In corpus** (8 questions) | 1.00, 1.00, 1.00, 0.79, 0.70, 0.69, 0.63, **0.34** |
+| **Out of corpus** (6 questions) | 0.23, 0.16, 0.13, and **three returning no rows at all** |
+
+Three of the six unanswerable questions — *capital of Peru*, *repot a monstera*, *what should I
+cook for dinner* — produce zero postings at all: `english` strips the stopwords and nothing
+survives that the corpus contains. For those the refusal is structural rather than thresholded,
+which is the strongest form it can take. The threshold is **0.5**, and it sits in the gap between
+0.34 and 0.63 that this one corpus of 53 chunks happened to show. It is a constant in the module
+rather than an environment variable, because the refusal path is not something that should be
+tunable until a demo passes — but it is arbitrary in the way any threshold is, and the lone
+in-corpus question it refuses is recorded as gap 19.
+
+**Coverage alone is not enough, and finding that out changed the rule.** A share cannot express
+how *much* the question asked. Coverage divides by the question's own IDF mass, so that mass
+cancels and never reaches the test: a question that reduces to one content lexeme is 100% covered
+by every chunk containing it. Measured, `notes` admitted a full page of six with **31 of 53
+chunks** qualifying, `power` with **18 of 53**, and *"what happened?"*, *"is it good?"* and
+*"what year is it?"* each did the same at coverage 1.000. That is not a ranking wobble. The app's
+only pre-model refusal is retrieval coming back empty, so a vacuous question would have reached
+the model and the refusal would have rested on the model obeying its prompt — which is the thing
+the paragraph above says was rejected. So admission is **both** conditions: at least half the
+question's IDF mass, **and** at least two distinct query lexemes matched. Two, because one word
+is not a question — it is a topic, and a topic matches a whole notebook. It needs no new tunable,
+and it is checked in the same SQL predicate as ownership, never in TypeScript. After the change
+all five short questions return nothing, and none of the five targeted questions regressed. What
+it costs is gap 20: a question that genuinely reduces to one content word gets no prose arm.
+
+**What it recovered.** The five previously-refused questions, re-measured against the running
+stack:
+
+| Question | Before | After |
+| --- | --- | --- |
+| *what mistakes have I already made once and want to avoid repeating?* | 0 rows — refused | 1 row, `01-cpu-notes.md`#0 — the expected document |
+| *what is the arithmetic I actually use for sizing?* | 0 rows — refused | 4 rows, `06-psu-sizing.md`#0 ranked first — the expected document |
+| *what did I underweight for years?* | 0 rows — refused | 2 rows, both `09-monitor-display.md` — the expected document |
+| *is undervolting worth doing?* | 0 rows — refused | 2 rows, `01-cpu-notes.md`#5 and `02-gpu-notes.md`#4 — both documents that discuss it |
+| *what contradiction did I never get to the bottom of?* | 0 rows — refused | **still 0 rows** — coverage 0.34, below the bar. Gap 19 |
+
+**And what it cost.** The prose arm runs on **every** question, like the identifier arm and
+unlike a rescue that fires only when the vector arm came back empty — gating one arm on another's
+outcome would make retrieval depend on the order the arms are evaluated in. Running on every
+question means it can make things worse, so the ten prose questions that already worked were
+measured before and after. The expected document is present in the top 6 for all ten. In three
+(*chipset*, *PSU age*, *power draw*) it is represented by **more** chunks than before. Two of
+those three evicted a document from the top 6 — in both cases a single-chunk, off-topic
+incidental hit, displaced by additional on-topic prose hits from the document the question is
+actually about. Three (*thermal paste*, *cheap board*, *fan count*) returned the same rows in a
+different order. No question lost its expected document.
+
+End to end through the running app: the six unanswerable questions all rendered "Not found in
+your knowledge base." and `llm_calls` stayed at 7 — none of them reached the model. Asking *"what
+is the arithmetic I actually use for sizing?"*, refused before this slice, returned an answer
+cited to `06-psu-sizing.md`, and `llm_calls` grew by exactly 1.
+
+**Fusing three rankings.** A cosine similarity, an unbounded text rank and a BM25 score are not
+on a scale that can be compared, while their ranks are, so the three lists are combined with
+reciprocal rank fusion. Fusion only **orders**: every list arrives already filtered in SQL by its
+own admission rule, nothing is admitted or dropped at fusion time, and an empty result stays
+empty — which is what keeps "Not found in your knowledge base." reachable before any model call.
+All three arms repeat the `owner_sub` and `embedding_model` predicates in their own SQL rather
+than trusting another arm to have applied them: ownership belongs in the same predicate as the
+search, and a third query is a third place to forget it.
+
+Both `content_tsv` and `content_tsv_en` are `GENERATED ALWAYS … STORED`, so they cannot drift
+from the content they index and there is no write path to keep in step. Postgres computes them
+for existing rows when the column is added, so all 53 already-indexed chunks became searchable on
+each migration, with nothing re-uploaded.
+
+`content_tsv_en` has **no GIN index**, deliberately, and this is a deviation from what the design
+promised. BM25 needs corpus-wide statistics — `N`, `avgdl`, `df` — so the query reads every one of
+the owner's chunks whatever happens, and it never issues the `@@` match an index would serve. An
+index here would be storage and write cost buying nothing. Measured on the seed corpus,
+`EXPLAIN (ANALYZE)` puts the query at **7.3–7.9 ms**, down from 19.9 ms before the stored column
+existed, of which 12.2 ms was computing `to_tsvector` on the fly. Next to an in-process embedding
+call and a model call, that is noise — but the full scan is gap 21.
+
+None of this SQL has an automated test, which is gap 23 and the second deviation from the design.
+Everything above was measured by hand against the running stack; a future edit to the query would
+need the same pass, because the suite cannot catch it.
 
 ---
 
@@ -782,8 +913,8 @@ src/
     privacy/anonymizer.ts
     rateLimit.ts          per-user quota on the one endpoint that costs money
     spend.ts              the daily ceiling on that same endpoint
-    rag/                  chunk · extract · ingest · retrieve · fuse · tokens
-                          · answer · citations · embeddingStatus · reembed
+    rag/                  chunk · extract · ingest · retrieve · bm25 · fuse
+                          · tokens · answer · citations · embeddingStatus · reembed
     retention/purge.ts
     db/                   schema + migrations, applied on startup
     log/                  logger.ts, llmAudit.ts
@@ -795,7 +926,7 @@ docs/implementation-plan.md
 ## Tests
 
 ```bash
-npm test          # 100 tests, node --test, no test framework
+npm test          # 102 tests, node --test, no test framework
 npm run typecheck
 ```
 
@@ -812,7 +943,7 @@ money incident rather than a visible bug:
 | The `gateway` provider | Against a stub gateway: the route, the bearer credential, the request, the parsing |
 | `consumeAskQuota` | The ceiling on what one session can spend |
 | `spendDecision` | The daily ceiling's boundary: the call that is allowed and the one that is not |
-| `distinctiveTerms` | It decides whether the lexical arm runs at all — return the wrong thing and the refusal path changes |
+| `distinctiveTerms` | It decides whether the identifier arm runs at all — return the wrong thing and the refusal path changes |
 | `fuseByRank` | That fusion only ORDERS: an empty result stays empty, and a lexical-only chunk is never dropped |
 | `describeStaleness` | Whether the app notices that its own index has gone unreachable — the one failure that is invisible from the inside |
 
@@ -901,11 +1032,14 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     (This gap previously claimed the seed corpus contained no two-token identifier to test
     against. That was wrong — `LGA 1700/1718/1851` is in two documents and `PCIe 3.0/4.0/5.0`
     in three — and the rule was built and measured against them.)
-12. **The lexical arm does no stemming and no synonyms.** It uses the `simple` dictionary, so
-    it matches identifiers exactly and matches nothing else — `NVMe` will not find `NVM`, and a
-    typo finds nothing. That is the intended trade for a part-number arm, but it means the arm
-    contributes nothing at all to ordinary prose questions, which remain entirely the vector
-    arm's job.
+12. **The *identifier* arm does no stemming and no synonyms.** It uses the `simple`
+    dictionary, so it matches identifiers exactly and matches nothing else — `NVMe` will not
+    find `NVM`, and a typo finds nothing. That is the intended trade for a part-number arm, and
+    it is why stemming lives in a second column rather than in this one: stemming a part number
+    can only lose information, while for prose it is the whole value (`underweight` matches 0
+    chunks under `simple` and 2 under `english`). This gap used to say "the lexical arm", full
+    stop, and to claim that ordinary prose questions remained entirely the vector arm's job.
+    Since the prose arm exists that is no longer true, and the narrowing is the point.
 13. **The daily cap is checked and incremented separately, so a burst can overshoot it.** The
     count is read when the request arrives and written after the model answers; requests in
     flight at the same moment all read the same number. The overshoot is bounded by how many
@@ -933,6 +1067,51 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     variable and never signs in sees nothing: there is no startup check, no log line and no
     way to re-embed on behalf of everyone. For a single-user knowledge base that is the whole
     population, and for anything larger it is the first thing to add.
+18. **The prose arm's 0.5 coverage constant is arbitrary in the way any threshold is.** It is
+    derived from a measured separation on one corpus of 53 chunks — answerable questions at
+    0.63 and above, unanswerable ones at 0.23 and below — and not from theory. `k1 = 1.2` and
+    `b = 0.75` are adopted from the BM25 literature and are defensible on that basis; 0.5 and
+    the two-term minimum are ours, and this line is the whole of their defence. The constants
+    are deliberately not environment variables: the refusal path should not be tunable until a
+    demo passes, so the honest version of that choice is to write the number down here.
+19. **A vague question is now refused for a new reason.** *"What contradiction did I never get
+    to the bottom of?"* has a best coverage of **0.34** and does not clear the bar, from a
+    corpus that contains a section headed *"unresolved contradiction"*. The vector arm refused
+    it before this slice and refuses it still; the prose arm was the thing that could have
+    rescued it, and its admission rule turns it away too. It is the one of the five measured
+    false refusals this slice set out to close that stayed shut, and it was predicted to stay
+    shut before the arm was built rather than discovered afterwards.
+20. **A genuine single-content-word question gets no prose arm at all.** Admission requires two
+    distinct matched query lexemes, so a question that reduces to one content word — after
+    `english` strips the stopwords — is never admitted, however real it is. That rule exists
+    because coverage is a *share* and saturates: measured, `notes` alone matched at coverage
+    1.000 with 31 of 53 chunks qualifying and `power` with 18 of 53, which would have put
+    vacuous questions in front of the model and moved the citation guarantee's first line of
+    defence off retrieval and onto the model obeying its prompt. "One word is not a question"
+    is the defensible form of the rule, and this is what it costs: such a question falls back
+    to the vector arm alone.
+21. **The prose arm reads every one of the owner's chunks.** BM25 needs corpus-wide statistics
+    — `N`, `avgdl` and `df` — so there is nothing to narrow the scan to, and no index that
+    could help: the query never issues a `@@` match, which is why `content_tsv_en` has no GIN
+    index and why the design's promise of one was dropped. Measured at 7.3–7.9 ms over 53
+    chunks. Fine at personal scale, and the same assumption as gap 6.
+22. **The prose arm is English-only,** explicitly so, because it names the `english` text search
+    configuration in both the generated column and the query. A corpus in another language
+    would be stemmed by the wrong rules and its stopwords would not be stripped. The identifier
+    arm's `simple` dictionary stays language-neutral; the vector arm's reach is whatever
+    `all-MiniLM-L6-v2` was trained on.
+23. **The prose arm's SQL has no automated test, and this is a deliberate deviation from what
+    the design promised.** The design said the coverage arithmetic would get a unit test. Every
+    branch of it turned out to be SQL — coverage, the term count, the admission predicate, the
+    ordering — and the test suite deliberately opens no database connection, because a test
+    that does can pass for the wrong reason. A TypeScript reimplementation of the arithmetic
+    would test the copy rather than the query, which is the failure mode slice 13's `&&`
+    precedence bug already demonstrated: a green suite past a broken query. The controlling
+    verification is instead a measured pass against the running stack, recorded in the
+    retrieval section above. The residual risk is plain: a future edit to that SQL can break
+    retrieval, and only another manual pass would catch it. Same spirit as gaps 1 and 2, which
+    admit that the `anthropic` and `gateway` providers are verified by construction rather than
+    by execution.
 
 ## What I would build next
 
@@ -940,19 +1119,25 @@ In this order, and for these reasons:
 
 1. **Run the `anthropic` path end to end and re-measure.** Gap 1 above. Everything else is
    downstream of knowing the real path works.
-2. **A BM25 arm for prose.** The lexical arm now catches part numbers in both the forms this
-   corpus writes them (see
-   [Retrieval](#retrieval-two-arms-because-embeddings-cannot-see-part-numbers)), and gaps 11
-   and 12 are what it still cannot do. Ordinary prose questions remain entirely the vector
-   arm's job. A real BM25 arm is the next honest step, and it needs `RAG_MIN_SCORE` rethought
-   first, because that floor is the thing currently holding the refusal path up.
-3. **A shared spend ceiling.** The daily cap now exists, in a table of its own — the audit
+2. **A shared spend ceiling.** The daily cap now exists, in a table of its own — the audit
    table could not hold it without becoming a behavioural log. What is still missing is a cap
    across *all* users, which is what an operator with a monthly budget actually wants, and
    the reconciliation that gaps 13 and 14 describe.
-4. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
+3. **A stronger anonymizer, behind the same interface.** The current one is a regex detector
    honestly described. A NER model would raise precision above 50% without changing a single
    call site — the seam is already there.
-5. **Streaming answers.** Currently the user waits for the whole response. The citation guard
+4. **Streaming answers.** Currently the user waits for the whole response. The citation guard
    has to run on a complete answer, so this needs care: stream the text, hold the sources
    until the guard has passed.
+
+**This list used to hold a second item, "a BM25 arm for prose". It is now built** — see
+[Retrieval](#retrieval-three-arms-because-an-embedder-forgets-the-words). Its stated
+precondition was wrong and is worth correcting rather than quietly building past, the way slice
+13 corrected gap 11's justification. It read: *"it needs `RAG_MIN_SCORE` rethought first,
+because that floor is the thing currently holding the refusal path up."* Measured, no. The floor
+goes on doing its job on the arm it was written for — it is what refuses a chunk the embedder
+scored 0.17 — and it was left untouched. What the refusal path needed was not a rethought floor
+but an admission rule belonging to the new arm, on a number that arm can produce: the share of
+the question's IDF mass a chunk accounts for, plus a minimum of two matched terms. A floor on a
+BM25 score would have been the tuned-by-feel threshold the whole design refuses; a floor
+borrowed from cosine similarity would have been that and incoherent besides.
