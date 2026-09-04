@@ -75,6 +75,7 @@ export function AskForm() {
   const [budgetScope, setBudgetScope] = useState<"user" | "deployment" | null>(
     null,
   );
+  const [budgetRetryAfter, setBudgetRetryAfter] = useState(0);
 
   // Mirrors `citations` state, but readable synchronously from inside the
   // catch below. `citations` itself is a snapshot from the render `ask()`
@@ -121,6 +122,7 @@ export function AskForm() {
         break;
       case "budget_exhausted":
         setBudgetScope(event.scope);
+        setBudgetRetryAfter(event.retryAfterSeconds);
         setOutcome("budget_exhausted");
         break;
       case "error":
@@ -141,6 +143,7 @@ export function AskForm() {
     setOutcome(null);
     setNotFoundReason(null);
     setBudgetScope(null);
+    setBudgetRetryAfter(0);
     citationsArrived.current = false;
     retracted.current = false;
 
@@ -278,7 +281,7 @@ export function AskForm() {
 
       {outcome === "budget_exhausted" && budgetScope && (
         <p className="mt-4 text-sm text-red-600">
-          {LIMIT_MESSAGE[budgetScope]}
+          {LIMIT_MESSAGE[budgetScope]} {retryHint(budgetRetryAfter)}
         </p>
       )}
 
@@ -322,6 +325,25 @@ export function AskForm() {
       )}
     </div>
   );
+}
+
+/**
+ * When the ceiling lifts, in words rather than in a header.
+ *
+ * A refusal decided before the stream opens is a 429 carrying `retry-after`. A
+ * refusal decided by `reserveCall` AFTER the first byte has gone out cannot be
+ * — the status is already committed — so it arrives as a `budget_exhausted`
+ * event on a 200, and the seconds it carries are the only actionable part.
+ * They are the same seconds the header would have held: until the daily window
+ * rolls at UTC midnight.
+ */
+function retryHint(seconds: number): string {
+  if (seconds <= 0) return "";
+
+  const hours = Math.round(seconds / 3_600);
+  if (hours >= 1) return `Try again in about ${hours} hour${hours === 1 ? "" : "s"}.`;
+
+  return `Try again in about ${Math.max(1, Math.round(seconds / 60))} minutes.`;
 }
 
 /**
