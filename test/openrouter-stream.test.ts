@@ -204,7 +204,7 @@ describe("openrouter streaming", () => {
     await assert.rejects(() => collect(), /no parseable answer/);
   });
 
-  it("refuses a truncated answer, even after streaming part of it", async () => {
+  it("refuses a truncated answer but still charges for it", async () => {
     // Cut off at the ceiling mid-sentence, with the citations already sent. The
     // fragment is the most dangerous shape this provider can produce — it looks
     // fully sourced — so it is refused, and the UI marks what it already showed
@@ -218,7 +218,12 @@ describe("openrouter streaming", () => {
     // not the truncation being caught before anything was shown.
     assert.deepEqual(emitted[0], { type: "citations", citations: [1] });
     assert.ok(emitted.some((event) => event.type === "delta"));
-    // And nothing claimed the call completed normally.
-    assert.ok(!emitted.some((event) => event.type === "usage"));
+
+    // The pairing is the property worth pinning: A REFUSED ANSWER IS STILL A
+    // CHARGED CALL. Refusing the answer and recording the cost are separate
+    // decisions, and this is the call that makes the difference largest — it
+    // spent the whole output budget by definition, so dropping the counts would
+    // record the most expensive call in the system as free.
+    assert.deepEqual(emitted.at(-1), usageEvent);
   });
 });

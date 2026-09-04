@@ -207,6 +207,17 @@ export function createMessagesProvider(
 
       const final = await stream.finalMessage();
 
+      // Built once, emitted on both ways out of this function. Last on the
+      // happy path, because token counts are only final when the call is:
+      // input tokens arrive with the first wire event and output tokens with
+      // the last, and the accumulated message is the one place both are
+      // settled.
+      const usage: AnswerStreamEvent = {
+        type: "usage",
+        inputTokens: final.usage.input_tokens,
+        outputTokens: final.usage.output_tokens,
+      };
+
       // A truncated answer is REFUSED, even though prose has already gone out.
       //
       // `answer` above has always refused this reply: cut off at the ceiling,
@@ -221,7 +232,17 @@ export function createMessagesProvider(
       // partial answer and its sources on screen and marks them incomplete. So
       // the user sees exactly what the model produced, labelled honestly, which
       // beats both silently keeping it and pretending it never arrived.
+      //
+      // The cost is reported first, and then the call fails. Refusing the
+      // ANSWER and recording the COST are separate decisions, and this project
+      // has always kept them apart: a timed-out call is charged (README gap
+      // 14), and slice 15 reserves the call before it is made. This is the most
+      // expensive call the model can produce — it spent the entire output
+      // budget by definition — and the counts are right there on the final
+      // message, so recording it as free would be the exact inverse of the
+      // truth in both the audit row and the day's spend.
       if (final.stop_reason === "max_tokens") {
+        yield usage;
         throw new Error("Model ran out of output tokens (stop_reason: max_tokens)");
       }
 
@@ -256,14 +277,7 @@ export function createMessagesProvider(
         yield { type: "delta", text: parsed.answer };
       }
 
-      // Last, because token counts are only final when the call is: input
-      // tokens arrive with the first wire event and output tokens with the
-      // last, and the accumulated message is the one place both are settled.
-      yield {
-        type: "usage",
-        inputTokens: final.usage.input_tokens,
-        outputTokens: final.usage.output_tokens,
-      };
+      yield usage;
     },
   };
 }
