@@ -449,6 +449,47 @@ describe("askQuestionStream", () => {
     assert.equal(charged.length, 1);
   });
 
+  it("charges a streaming call the guard rejected", async () => {
+    // A rejected call is charged exactly like an accepted one — the same
+    // invariant `oneShot` keeps by yielding usage first, and the one ai/call.ts
+    // keeps for a call that times out. A streaming provider can only know its
+    // token counts at the end, so abandoning the stream the moment the
+    // citations are rejected charged the most reachable failure in the system
+    // nothing at all. The stream is drained instead.
+    const charged: Array<[number, number]> = [];
+    const model = async function* (): AsyncGenerator<AnswerStreamEvent> {
+      yield { type: "citations", citations: [99] };
+      yield { type: "delta", text: "this text must never be shown" };
+      yield { type: "usage", inputTokens: 500, outputTokens: 4_000 };
+    };
+
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+        recordTokens: async (_sub, input, output) => {
+          charged.push([input, output]);
+        },
+      }),
+    );
+
+    // Two attempts, both rejected, both charged what the provider reported.
+    assert.deepEqual(charged, [
+      [500, 4_000],
+      [500, 4_000],
+    ]);
+
+    // Draining must not leak: the prose that followed the rejected citations
+    // reached the orchestrator and had to be dropped, not shown.
+    assert.ok(!events.some((e) => e.type === "delta"));
+    assert.ok(!events.some((e) => e.type === "citations"));
+    assert.equal(events.at(-1)?.type, "not_found");
+  });
+
   it("ignores a second citations set", async () => {
     // A later set cannot retroactively justify prose already shown, and must
     // not slip past a gate the first set opened.

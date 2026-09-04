@@ -226,4 +226,78 @@ describe("openrouter streaming", () => {
     // record the most expensive call in the system as free.
     assert.deepEqual(emitted.at(-1), usageEvent);
   });
+
+  it("refuses a reply that answers twice, having streamed the first object", async () => {
+    // The worst shape this provider can produce, and the reason the complete
+    // message is validated whatever the loop did. The model echoes the prompt's
+    // example and then answers for real. `readPartial` sees a complete,
+    // well-formed citation array — the EXAMPLE's — and streams the example's
+    // prose, so the user would be shown "..." cited to source 2, which is in
+    // range and which the guard downstream would therefore accept. The
+    // whole-answer path refuses this identical reply, because `parseFromText`
+    // spans the first brace to the last and `JSON.parse` chokes on two objects.
+    payload = sse(
+      'Example: {"citations": [2], "answer": "..."} ' +
+        'Actual: {"citations": [1], "answer": "The PSU is 750 W."}',
+    );
+
+    const emitted: AnswerStreamEvent[] = [];
+    await assert.rejects(() => collect(emitted), /no parseable answer/);
+
+    // It got as far as streaming the example — that is exactly the damage the
+    // final validation exists to undo — but the call fails, so nothing
+    // downstream ships it as an answer.
+    assert.deepEqual(emitted[0], { type: "citations", citations: [2] });
+    assert.deepEqual(emitted.at(-1), usageEvent);
+  });
+
+  it("refuses a reply with citations and no answer field", async () => {
+    // Valid citations, nothing to justify. zod requires `answer`, so the
+    // whole-answer path throws; streaming must not turn that into an empty
+    // answer that becomes "Not found in your knowledge base." downstream —
+    // blaming the corpus for a model that never usably replied.
+    payload = sse('{"citations": [1]}');
+
+    await assert.rejects(() => collect(), /no parseable answer/);
+  });
+
+  it("refuses a reply whose answer is not a string", async () => {
+    payload = sse('{"citations": [1], "answer": 42}');
+
+    await assert.rejects(() => collect(), /no parseable answer/);
+  });
+
+  it("accepts an ordinary multi-source reply, unchanged", async () => {
+    // The over-strictness guard. The cross-check after the loop compares the
+    // streamed citation set with the final one, and a set of more than one
+    // element must compare equal to itself.
+    payload = sse('{"citations": [1, 2], "answer": "750 W, per both notes."}');
+
+    const events = await collect();
+
+    assert.deepEqual(events[0], { type: "citations", citations: [1, 2] });
+    assert.equal(
+      events
+        .filter((event) => event.type === "delta")
+        .map((event) => (event as { text: string }).text)
+        .join(""),
+      "750 W, per both notes.",
+    );
+    assert.deepEqual(events.at(-1), usageEvent);
+  });
+
+  it("accepts a usable reply that says nothing, and leaves the refusal upstream", async () => {
+    // The line between "the model gave a usable reply that says nothing" and
+    // "the model never usably replied". An empty answer is legal in the schema,
+    // so this is NOT a failed call and must not throw — the guard's second half
+    // in rag/answer.ts refuses it, having shown the user nothing, and the
+    // difference matters because a failed call and a refused answer are told to
+    // the user in different words.
+    payload = sse('{"citations": [1], "answer": ""}');
+
+    assert.deepEqual(await collect(), [
+      { type: "citations", citations: [1] },
+      usageEvent,
+    ]);
+  });
 });

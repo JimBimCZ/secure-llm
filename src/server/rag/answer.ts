@@ -322,7 +322,21 @@ export async function* askQuestionStream(
           citations = resolveCitations(event.citations, retrieved);
           // Nothing is emitted here. An invalid set means this attempt is over,
           // and the user has been shown nothing to take back.
-          if (citations.length === 0) break;
+          //
+          // But the stream is DRAINED rather than abandoned. Breaking out here
+          // sends `return()` to the provider, which cancels the call before its
+          // `usage` event — and a real streaming provider only knows its token
+          // counts at the end, so the most reachable failure in the system was
+          // being charged nothing. A call the guard rejects is charged exactly
+          // like one it accepts: that is the same invariant `oneShot` above
+          // preserves by yielding usage first, and the one ai/call.ts keeps for
+          // a call that times out. Draining costs the rest of one response's
+          // latency on a path that is about to refuse anyway, and buys a spend
+          // ledger that a model cannot escape by citing badly.
+          //
+          // Nothing more reaches the user: `citations` is empty for the rest of
+          // this attempt, and `release` — the one gate every piece of prose
+          // passes through — drops everything while it is.
           continue;
         }
 

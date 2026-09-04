@@ -138,6 +138,11 @@ export function createMessagesProvider(
      * never correctness: a model that ignores the prompt's ordering still has
      * to get the right answer, just not an early one. The loop below buys the
      * first with `readPartial`; the block after it pays for the second.
+     *
+     * And whatever the loop did, the call ends by validating the COMPLETE
+     * message the way `answer` does. Streaming may only ever make an accepted
+     * reply arrive sooner — never make a reply acceptable that the
+     * whole-answer path would have refused.
      */
     async *answerStream(
       input: AnswerInput,
@@ -169,7 +174,14 @@ export function createMessagesProvider(
 
       /** The JSON object so far — text deltas only, in arrival order. */
       let accumulated = "";
-      let sentCitations = false;
+      /**
+       * The citation set already emitted, or null while none has been.
+       *
+       * The VALUE and not just a flag, because the check after the loop has to
+       * confirm that what went out early is what the reply actually ended up
+       * saying.
+       */
+      let sentCitations: number[] | null = null;
       /** How many characters of the answer have already gone out as deltas. */
       let sentUpTo = 0;
 
@@ -194,9 +206,9 @@ export function createMessagesProvider(
         // guess, so this is a wait and never a gamble.
         if (citations === null) continue;
 
-        if (!sentCitations) {
+        if (sentCitations === null) {
           yield { type: "citations", citations };
-          sentCitations = true;
+          sentCitations = citations;
         }
 
         if (answerSoFar.length > sentUpTo) {
@@ -246,35 +258,63 @@ export function createMessagesProvider(
         throw new Error("Model ran out of output tokens (stop_reason: max_tokens)");
       }
 
-      // A model that put `answer` before `citations`, or wrapped the object in
-      // prose, reaches here having streamed nothing, and the whole reply is
-      // emitted now — the same events, in the same order, that the
-      // non-streaming path would have produced. That is the degradation this
-      // design accepts, and it is why field order costs latency and never
-      // correctness.
+      // The complete reply is validated ALWAYS — whether or not anything was
+      // streamed — because `readPartial` is a FAST PATH, not an authority.
       //
-      // It cannot double-emit. A `delta` is reachable only inside the branch
-      // that sets `sentCitations`, so `sentUpTo > 0` implies `sentCitations`,
-      // and this block runs only when `sentCitations` is false: the loop above
-      // and the recovery below are mutually exclusive by construction, not by
-      // being careful.
-      if (!sentCitations) {
-        const parsed =
-          // Present only when the server enforced the schema for us.
-          (final.parsed_output as AnswerJson | null | undefined) ??
-          parseFromText(final.content);
+      // It scans a buffer that has not finished arriving, so it cannot know
+      // that the well-formed object it just read is one of two, or that the
+      // reply ends in a shape the schema rejects. A model that echoes the
+      // prompt's example before answering — `Example: {…} Actual: {…}` — hands
+      // it a complete citation array belonging to the EXAMPLE, and it will
+      // happily stream the example as the answer. `answer` above refuses that
+      // identical reply, because `parseFromText` spans the first brace to the
+      // last and `JSON.parse` chokes on two objects; so does a reply with no
+      // `answer` field, or one whose `answer` is a number, because zod says so.
+      //
+      // Making that check conditional on having streamed nothing is what turned
+      // a failed call into a confidently wrong one. So the streaming path now
+      // ENDS where the non-streaming path ends: the reply is accepted only if
+      // the complete object still parses, and still parses to what went out.
+      const parsed =
+        // Present only when the server enforced the schema for us.
+        (final.parsed_output as AnswerJson | null | undefined) ??
+        parseFromText(final.content);
 
-        if (!parsed) {
-          // The same judgement `answer` makes above, for the same reason: a
-          // call that never usably replied is a FAILED CALL, not an answer
-          // with no citations.
-          throw new Error(
-            `Model returned no parseable answer (stop_reason: ${final.stop_reason})`,
-          );
-        }
+      if (!parsed) {
+        // The same judgement `answer` makes above, for the same reason: a call
+        // that never usably replied is a FAILED CALL, not an answer with no
+        // citations. Calling it the latter would have the app blame the corpus
+        // for the model's failure.
+        yield usage;
+        throw new Error(
+          `Model returned no parseable answer (stop_reason: ${final.stop_reason})`,
+        );
+      }
 
+      if (sentCitations === null) {
+        // Nothing was streamed: the model put `answer` before `citations`, or
+        // wrapped the object in prose. The whole reply goes out now — the same
+        // events, in the same order, the non-streaming path would have
+        // produced. That is the degradation this design accepts, and it is why
+        // field order costs latency and never correctness.
+        //
+        // It cannot double-emit: a `delta` is reachable only inside the branch
+        // that assigns `sentCitations`, so this block and the loop above are
+        // mutually exclusive by construction rather than by being careful.
         yield { type: "citations", citations: parsed.citations };
         yield { type: "delta", text: parsed.answer };
+      } else if (
+        sentCitations.length !== parsed.citations.length ||
+        sentCitations.some((n, i) => n !== parsed.citations[i])
+      ) {
+        // What went out early is not what the reply ended up citing, so the
+        // sources the user was shown are not the model's. One comparison, and
+        // it is the direct guard against having latched onto an echoed example
+        // that happened to parse on its own.
+        yield usage;
+        throw new Error(
+          "Model streamed a citation set its final answer does not agree with",
+        );
       }
 
       yield usage;
