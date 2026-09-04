@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 
-import type { AnswerInput, AnswerStreamEvent, LlmProvider } from "@/server/ai/types";
+import {
+  UnverifiedAnswerError,
+  type AnswerInput,
+  type AnswerStreamEvent,
+  type LlmProvider,
+} from "@/server/ai/types";
 
 /**
  * The streaming half of the shared Messages call path, against a stub that
@@ -283,6 +288,65 @@ describe("openrouter streaming", () => {
       "FAKE TEXT NOT THE ANSWER",
     );
     assert.deepEqual(emitted.at(-1), usageEvent);
+  });
+
+  it("names an unparseable reply unverified, having already streamed prose", async () => {
+    // The classification is what the retraction downstream hangs on: prose went
+    // out, and the finished reply cannot vouch for a word of it. Distinguishing
+    // this from a truncation is the whole reason the error has a type — one
+    // leaves genuine text on screen, the other leaves an echoed example there.
+    payload = sse(
+      'Example: {"citations": [2], "answer": "..."} ' +
+        'Actual: {"citations": [1], "answer": "The PSU is 750 W."}',
+    );
+
+    await assert.rejects(
+      () => collect(),
+      (error: unknown) => error instanceof UnverifiedAnswerError,
+    );
+  });
+
+  it("names a reply that disagrees with its own streamed prose unverified", async () => {
+    payload = sse(
+      '{"citations": [1], "meta": {"answer": "FAKE TEXT NOT THE ANSWER"}, ' +
+        '"answer": "The PSU is rated 750 W."}',
+    );
+
+    await assert.rejects(
+      () => collect(),
+      (error: unknown) => error instanceof UnverifiedAnswerError,
+    );
+  });
+
+  it("names a reply that disagrees with its own streamed citations unverified", async () => {
+    // The citation half of the cross-check, which nothing else reaches: the key
+    // appears twice, so `readPartial` anchors to the FIRST and streams [2]
+    // while `JSON.parse` keeps the LAST and validates [1]. The user was shown
+    // sources the model's finished reply does not claim.
+    payload = sse(
+      '{"citations": [2], "answer": "The PSU is rated 750 W.", "citations": [1]}',
+    );
+
+    const emitted: AnswerStreamEvent[] = [];
+    await assert.rejects(
+      () => collect(emitted),
+      (error: unknown) => error instanceof UnverifiedAnswerError,
+    );
+    assert.deepEqual(emitted[0], { type: "citations", citations: [2] });
+  });
+
+  it("does not call a truncated answer unverified, because its prose is genuine", async () => {
+    // Cut off at the ceiling, so what streamed IS what the model said as far as
+    // it got. The reply is refused either way, but this one keeps its prose on
+    // screen labelled incomplete rather than being retracted, and the type is
+    // what tells the two apart.
+    payload = sse('{"citations": [1], "answer": "The PSU is rat', "max_tokens");
+
+    await assert.rejects(
+      () => collect(),
+      (error: unknown) =>
+        error instanceof Error && !(error instanceof UnverifiedAnswerError),
+    );
   });
 
   it("refuses a reply with citations and no answer field", async () => {

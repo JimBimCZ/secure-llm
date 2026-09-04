@@ -4,11 +4,12 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { readPartial } from "@/server/ai/partialJson";
 import { renderAnswerPrompt } from "@/server/ai/prompts";
 import { answerSchema, type AnswerJson } from "@/server/ai/providers/schema";
-import type {
-  AnswerInput,
-  AnswerResult,
-  AnswerStreamEvent,
-  LlmProvider,
+import {
+  UnverifiedAnswerError,
+  type AnswerInput,
+  type AnswerResult,
+  type AnswerStreamEvent,
+  type LlmProvider,
 } from "@/server/ai/types";
 import { env } from "@/server/env";
 
@@ -296,7 +297,7 @@ export function createMessagesProvider(
         // citations. Calling it the latter would have the app blame the corpus
         // for the model's failure.
         yield usage;
-        throw new Error(
+        throw new UnverifiedAnswerError(
           `Model returned no parseable answer (stop_reason: ${final.stop_reason})`,
         );
       }
@@ -322,7 +323,7 @@ export function createMessagesProvider(
         // it is the direct guard against having latched onto an echoed example
         // that happened to parse on its own.
         yield usage;
-        throw new Error(
+        throw new UnverifiedAnswerError(
           "Model streamed a citation set its final answer does not agree with",
         );
       } else if (readPartial(accumulated).answerSoFar !== parsed.answer) {
@@ -340,7 +341,7 @@ export function createMessagesProvider(
         // cleanly compares equal and is never caught by this net meant for
         // decoys.
         yield usage;
-        throw new Error(
+        throw new UnverifiedAnswerError(
           "Model streamed prose its final answer does not agree with",
         );
       }

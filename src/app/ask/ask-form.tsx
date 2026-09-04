@@ -29,10 +29,18 @@ type AskEvent =
   | { type: "delta"; text: string }
   | { type: "done" }
   | { type: "not_found"; reason: string }
+  /**
+   * Take back what is already on screen. The only event that contradicts the
+   * ones before it: the server streamed prose and its sources, and the model's
+   * finished reply then failed to vouch for them. Handled by clearing both —
+   * an answer the guard cannot stand behind must not be left readable, which
+   * is what CLAUDE.md §6 means by "not shipped".
+   */
+  | { type: "retracted" }
   | { type: "budget_exhausted"; scope: "user" | "deployment"; retryAfterSeconds: number }
   | { type: "error" };
 
-type Outcome = "done" | "not_found" | "budget_exhausted" | "error";
+type Outcome = "done" | "not_found" | "retracted" | "budget_exhausted" | "error";
 
 /** Same wording the HTTP 429 path shows for each scope; see api/ask/route.ts. */
 const LIMIT_MESSAGE: Record<"user" | "deployment", string> = {
@@ -75,6 +83,12 @@ export function AskForm() {
   // at the moment the connection drops, not the one captured at submit time.
   const citationsArrived = useRef(false);
 
+  // A retraction is final, and it is the one terminal state a later transport
+  // failure could overwrite with a worse and wronger message: the catch below
+  // reads `citationsArrived`, which was true right up until the retraction
+  // cleared the screen.
+  const retracted = useRef(false);
+
   function handle(event: AskEvent) {
     switch (event.type) {
       case "privacy":
@@ -93,6 +107,17 @@ export function AskForm() {
       case "not_found":
         setNotFoundReason(event.reason);
         setOutcome("not_found");
+        break;
+      case "retracted":
+        // Both, and in this order for the same reason the server holds the
+        // citations event back: prose and sources are shown together or not at
+        // all. `citationsArrived` goes with them, so nothing downstream still
+        // believes there is an answer on screen to qualify.
+        retracted.current = true;
+        citationsArrived.current = false;
+        setCitations(null);
+        setAnswer("");
+        setOutcome("retracted");
         break;
       case "budget_exhausted":
         setBudgetScope(event.scope);
@@ -117,6 +142,7 @@ export function AskForm() {
     setNotFoundReason(null);
     setBudgetScope(null);
     citationsArrived.current = false;
+    retracted.current = false;
 
     try {
       const response = await fetch("/api/ask", {
@@ -179,6 +205,10 @@ export function AskForm() {
       // what marks them incomplete. Only a failure before that point is the
       // generic "could not reach the server", because then there is nothing
       // on screen to qualify.
+      if (retracted.current) {
+        // The stream said its piece and the screen is already correct.
+        return;
+      }
       if (citationsArrived.current) {
         setOutcome("error");
       } else {
@@ -229,6 +259,19 @@ export function AskForm() {
             {notFoundReason === "no_relevant_chunks"
               ? "Nothing in your documents was close enough to the question to answer it."
               : "An answer came back, but it could not be traced to a source, so it was discarded."}
+          </p>
+        </div>
+      )}
+
+      {outcome === "retracted" && (
+        <div className="mt-6 rounded border border-amber-200 bg-amber-50 p-4">
+          <p className="text-sm font-medium text-amber-900">
+            The answer was withdrawn.
+          </p>
+          <p className="mt-1 text-xs text-amber-800">
+            What the model finished saying did not match what it had already
+            sent, so the answer could not be verified against its sources and
+            was discarded.
           </p>
         </div>
       )}

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type {
-  AnswerInput,
-  AnswerResult,
-  AnswerStreamEvent,
+import {
+  UnverifiedAnswerError,
+  type AnswerInput,
+  type AnswerResult,
+  type AnswerStreamEvent,
 } from "@/server/ai/types";
 import {
   askQuestion,
@@ -118,6 +119,30 @@ describe("askQuestion", () => {
     const result = await askQuestion("alice", "q?", deps(sources, model));
 
     assert.equal(result.status, "not_found");
+  });
+
+  it("reports a retracted answer as its own status, not as not_found", async () => {
+    // The collector cannot say "not found in your knowledge base" here: the
+    // sources were fine and the model contradicted itself. Blaming the corpus
+    // for that is the untruth `messages.ts` already refuses to tell about a
+    // call that never usably replied.
+    const model = async function* (): AsyncGenerator<AnswerStreamEvent> {
+      yield { type: "citations", citations: [1] };
+      yield { type: "delta", text: "text the model never gave as its answer" };
+      yield { type: "usage", inputTokens: 1, outputTokens: 1 };
+      throw new UnverifiedAnswerError("does not agree with");
+    };
+
+    const result = await askQuestion("alice", "how big is the PSU?", {
+      ...deps(sources, {
+        answer: async () => {
+          throw new Error("unused");
+        },
+      }),
+      answerStream: () => model(),
+    });
+
+    assert.equal(result.status, "retracted");
   });
 
   it("never calls the model when nothing was retrieved", async () => {
@@ -488,6 +513,139 @@ describe("askQuestionStream", () => {
     assert.ok(!events.some((e) => e.type === "delta"));
     assert.ok(!events.some((e) => e.type === "citations"));
     assert.equal(events.at(-1)?.type, "not_found");
+  });
+
+  it("retracts what it streamed when the finished reply cannot vouch for it", async () => {
+    // The residual this slice exists to close. The prose and its sources really
+    // did go out — the provider only learns the reply contradicts them once the
+    // whole message has arrived — so a terminal event that merely says "error"
+    // leaves them on screen, labelled incomplete but readable. `retracted` is
+    // the instruction to take them back.
+    const charged: Array<[number, number]> = [];
+    const model = async function* (): AsyncGenerator<AnswerStreamEvent> {
+      yield { type: "citations", citations: [1] };
+      yield { type: "delta", text: "text the model never gave as its answer" };
+      yield { type: "usage", inputTokens: 500, outputTokens: 900 };
+      throw new UnverifiedAnswerError(
+        "Model streamed prose its final answer does not agree with",
+      );
+    };
+
+    const reservations: string[] = [];
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+        reserveCall: async (sub) => {
+          reservations.push(sub);
+          return { allowed: true };
+        },
+        recordTokens: async (_sub, input, output) => {
+          charged.push([input, output]);
+        },
+      }),
+    );
+
+    assert.equal(events.at(-1)?.type, "retracted");
+    // Not a citation-guard rejection: the guard passed, and a stricter prompt
+    // has nothing to fix. One call, not two.
+    assert.deepEqual(reservations, ["alice"]);
+    assert.ok(!events.some((e) => e.type === "not_found"));
+    // Refusing the answer and recording the cost stay separate decisions.
+    assert.deepEqual(charged, [[500, 900]]);
+  });
+
+  it("does not withdraw an answer it never showed", async () => {
+    // The same unverified reply, caught before anything went out — the model
+    // wrapped its JSON in prose, so the scanner never anchored and the citation
+    // event never fired. There is nothing on screen to take back, and telling
+    // a reader their answer was withdrawn when they never saw one explains a
+    // thing that did not happen. It stays an ordinary failed call.
+    const model = async function* (): AsyncGenerator<AnswerStreamEvent> {
+      yield { type: "usage", inputTokens: 1, outputTokens: 1 };
+      throw new UnverifiedAnswerError("Model returned no parseable answer");
+    };
+
+    await assert.rejects(
+      () =>
+        collectEvents(
+          askQuestionStream("alice", "how big is the PSU?", {
+            ...deps(sources, {
+              answer: async () => {
+                throw new Error("unused");
+              },
+            }),
+            answerStream: () => model(),
+          }),
+        ),
+      /no parseable answer/,
+    );
+  });
+
+  it("lets a dropped connection stay a cut-short answer", async () => {
+    // The other half of the distinction: what streamed before the drop is
+    // genuine prose, so it keeps the behaviour slice 18 chose for it. The error
+    // propagates and the route turns it into `error`, never `retracted`.
+    const model = async function* (): AsyncGenerator<AnswerStreamEvent> {
+      yield { type: "citations", citations: [1] };
+      yield { type: "delta", text: "750 " };
+      yield { type: "usage", inputTokens: 1, outputTokens: 1 };
+      throw new Error("socket hang up");
+    };
+
+    await assert.rejects(
+      () =>
+        collectEvents(
+          askQuestionStream("alice", "how big is the PSU?", {
+            ...deps(sources, {
+              answer: async () => {
+                throw new Error("unused");
+              },
+            }),
+            answerStream: () => model(),
+          }),
+        ),
+      /socket hang up/,
+    );
+  });
+
+  it("shows no placeholder syntax when the stream fails mid-placeholder", async () => {
+    // README gap 39 claimed a drop inside a placeholder puts `[EMAIL_` on
+    // screen. It cannot: the restorer's held suffix is released by `flush()`,
+    // which the failing path never reaches. Pinned here so a future `finally`
+    // around the flush cannot reintroduce it silently.
+    const personal = [chunk(1, "Ask marek.dvorak@example.com about the unit.")];
+    const model = async function* (): AsyncGenerator<AnswerStreamEvent> {
+      yield { type: "citations", citations: [1] };
+      yield { type: "delta", text: "Write to " };
+      yield { type: "delta", text: "[EMAIL_" };
+      throw new Error("socket hang up");
+    };
+
+    const events: AskEvent[] = [];
+    await assert.rejects(async () => {
+      for await (const event of askQuestionStream("alice", "who owns it?", {
+        ...deps(personal, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      })) {
+        events.push(event);
+      }
+    }, /socket hang up/);
+
+    const shown = events
+      .filter((e) => e.type === "delta")
+      .map((e) => (e as { text: string }).text)
+      .join("");
+    assert.equal(shown, "Write to ");
+    assert.ok(!shown.includes("[EMAIL_"), "no placeholder syntax reached the user");
   });
 
   it("ignores a second citations set", async () => {
