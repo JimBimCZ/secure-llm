@@ -126,6 +126,18 @@ export async function* answerStreamWithAudit(
   // stopped waiting for keeps running, and keeps costing, until it is aborted.
   const signal = AbortSignal.timeout(env.LLM_TIMEOUT_MS);
 
+  // Whether there is a first-token moment to measure at all.
+  //
+  // A provider without `answerStream` is called through `oneShotFromAnswer`
+  // below, which yields ONE synthetic delta carrying the whole answer the
+  // instant the call resolves. Timing that delta would record a
+  // time-to-first-token equal to the total latency — a number that reads
+  // like a very fast stream rather than like the absence of one. The column
+  // is null for these calls on purpose: they have no first token, and
+  // inventing one would make the only interesting comparison in the table
+  // (first token against total) false for every provider that does not stream.
+  const streams = provider.answerStream !== undefined;
+
   let firstTokenMs: number | undefined;
   let usage = { inputTokens: 0, outputTokens: 0 };
   // "ok" unless the catch below says otherwise. This is also the outcome
@@ -145,7 +157,7 @@ export async function* answerStreamWithAudit(
       : oneShotFromAnswer(provider, input, signal);
 
     for await (const event of stream) {
-      if (event.type === "delta" && firstTokenMs === undefined) {
+      if (streams && event.type === "delta" && firstTokenMs === undefined) {
         firstTokenMs = Date.now() - startedAt;
       }
       if (event.type === "usage") {
