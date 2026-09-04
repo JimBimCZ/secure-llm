@@ -13,12 +13,18 @@ import { z } from "zod";
  * field read three files away.
  */
 export const answerSchema = z.object({
-  answer: z.string(),
   /**
+   * `citations` is declared FIRST, and that order is not cosmetic: it is the
+   * order the prompt asks the model for and the order `structuredOutputs`
+   * advertises to a server that enforces the schema. The streaming path can then
+   * run the citation guard before any prose is shown. A model that ignores the
+   * order still parses correctly — it just cannot be streamed early.
+   *
    * Source numbers as shown in the prompt, 1-based. Whether they are in range
    * is the citation guard's decision, not this schema's — see rag/answer.ts.
    */
   citations: z.array(z.number().int()),
+  answer: z.string(),
 });
 
 export type AnswerJson = z.infer<typeof answerSchema>;

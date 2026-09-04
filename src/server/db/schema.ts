@@ -166,6 +166,12 @@ export const llmCalls = pgTable(
     inputTokens: integer("input_tokens").notNull(),
     outputTokens: integer("output_tokens").notNull(),
     latencyMs: integer("latency_ms").notNull(),
+    /**
+     * Time to the FIRST token, for a streaming call. Null for a provider that
+     * does not stream — such a call has no first-token moment, and a zero
+     * would claim it had one. A duration, not content, so §3 holds.
+     */
+    firstTokenMs: integer("first_token_ms"),
     /** ok | timeout | error */
     outcome: text("outcome").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })

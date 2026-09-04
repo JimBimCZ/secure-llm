@@ -28,7 +28,12 @@ export function createAnthropicProvider(): LlmProvider {
 
   // The vendor's own API, so the newest features are available: let the server
   // enforce the response shape as well as our own zod check.
+  // Streaming off: never run against this endpoint (README gap 1), so the
+  // provider exposes no `answerStream` and ai/call.ts uses the whole-answer
+  // path. Answers arrive complete rather than incrementally; nothing else
+  // changes, and turning it on is this one flag.
   return createMessagesProvider("anthropic", client, {
     structuredOutputs: true,
+    streaming: false,
   });
 }

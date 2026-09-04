@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { AnswerInput, AnswerResult } from "@/server/ai/types";
-import { askQuestion, type AskDependencies } from "@/server/rag/answer";
+import type {
+  AnswerInput,
+  AnswerResult,
+  AnswerStreamEvent,
+} from "@/server/ai/types";
+import {
+  askQuestion,
+  askQuestionStream,
+  type AskDependencies,
+  type AskEvent,
+} from "@/server/rag/answer";
 import type { RetrievedChunk } from "@/server/rag/retrieve";
 import type { Reservation } from "@/server/spend";
 
@@ -272,5 +281,236 @@ describe("askQuestion", () => {
         "the question exactly as it left the process",
       );
     });
+  });
+});
+
+/** A model that streams, so the ordering guarantee can be asserted. */
+function stubStream(citations: number[], pieces: string[]) {
+  return async function* (): AsyncGenerator<AnswerStreamEvent> {
+    yield { type: "citations", citations };
+    for (const text of pieces) yield { type: "delta", text };
+    yield { type: "usage", inputTokens: 1, outputTokens: 1 };
+  };
+}
+
+async function collectEvents(stream: AsyncGenerator<AskEvent>) {
+  const events: AskEvent[] = [];
+  for await (const event of stream) events.push(event);
+  return events;
+}
+
+/**
+ * The same guard, met through the streaming path.
+ *
+ * What these add over the `askQuestion` cases above is ORDER: a collector can
+ * only see what a stream ended up containing, and the promise in CLAUDE.md §6
+ * is about what the user is shown BEFORE the answer is complete. Prose that
+ * arrives ahead of the citations justifying it has already been read by the
+ * time a late refusal arrives.
+ */
+describe("askQuestionStream", () => {
+  it("never emits a delta before the citations that justify it", async () => {
+    const model = stubStream([1], ["750 ", "W."]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    const kinds = events.map((e) => e.type);
+    assert.ok(kinds.indexOf("citations") < kinds.indexOf("delta"));
+    assert.equal(kinds.at(-1), "done");
+  });
+
+  it("shows nothing at all when the model cites a source it was not given", async () => {
+    const model = stubStream([99], ["this text must never be shown"]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    assert.ok(!events.some((e) => e.type === "delta"));
+    assert.ok(!events.some((e) => e.type === "citations"));
+    assert.equal(events.at(-1)?.type, "not_found");
+  });
+
+  it("refuses an answer whose citations are valid but whose prose is empty", async () => {
+    const model = stubStream([1], ["   "]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    assert.ok(!events.some((e) => e.type === "citations"));
+    assert.equal(events.at(-1)?.type, "not_found");
+  });
+
+  it("emits the privacy event before the model is reached", async () => {
+    const model = stubStream([1], ["750 W."]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    assert.equal(events[0]?.type, "privacy");
+  });
+
+  it("answers when the whole answer is held back by the restorer", async () => {
+    // "[TBD" is withheld by the restorer until flush, which used to mean the
+    // citations gate never opened and a valid answer was refused.
+    const model = stubStream([1], ["[TBD"]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    assert.equal(events.at(-1)?.type, "done");
+    assert.equal(
+      events
+        .filter((e) => e.type === "delta")
+        .map((e) => e.text)
+        .join(""),
+      "[TBD",
+    );
+  });
+
+  it("streams the answer byte for byte, leading whitespace included", async () => {
+    // The non-streaming path returned the model's answer verbatim. Text the
+    // gate held back while waiting for something visible is shown, not dropped.
+    const model = stubStream([1], ["   ", "750 W."]);
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+      }),
+    );
+
+    assert.equal(
+      events
+        .filter((e) => e.type === "delta")
+        .map((e) => e.text)
+        .join(""),
+      "   750 W.",
+    );
+  });
+
+  it("records spend even when the consumer stops reading", async () => {
+    // A reserved call that the client walked away from is still a call that
+    // was made. Nothing downstream charges it if this does not.
+    const charged: number[][] = [];
+    const model = stubStream([1], ["750 ", "W."]);
+    const stream = askQuestionStream("alice", "how big is the PSU?", {
+      ...deps(sources, {
+        answer: async () => {
+          throw new Error("unused");
+        },
+      }),
+      answerStream: () => model(),
+      recordTokens: async (_sub, i, o) => {
+        charged.push([i, o]);
+      },
+    });
+
+    for await (const event of stream) if (event.type === "delta") break;
+
+    assert.equal(charged.length, 1);
+  });
+
+  it("charges a streaming call the guard rejected", async () => {
+    // A rejected call is charged exactly like an accepted one — the same
+    // invariant `oneShot` keeps by yielding usage first, and the one ai/call.ts
+    // keeps for a call that times out. A streaming provider can only know its
+    // token counts at the end, so abandoning the stream the moment the
+    // citations are rejected charged the most reachable failure in the system
+    // nothing at all. The stream is drained instead.
+    const charged: Array<[number, number]> = [];
+    const model = async function* (): AsyncGenerator<AnswerStreamEvent> {
+      yield { type: "citations", citations: [99] };
+      yield { type: "delta", text: "this text must never be shown" };
+      yield { type: "usage", inputTokens: 500, outputTokens: 4_000 };
+    };
+
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model(),
+        recordTokens: async (_sub, input, output) => {
+          charged.push([input, output]);
+        },
+      }),
+    );
+
+    // Two attempts, both rejected, both charged what the provider reported.
+    assert.deepEqual(charged, [
+      [500, 4_000],
+      [500, 4_000],
+    ]);
+
+    // Draining must not leak: the prose that followed the rejected citations
+    // reached the orchestrator and had to be dropped, not shown.
+    assert.ok(!events.some((e) => e.type === "delta"));
+    assert.ok(!events.some((e) => e.type === "citations"));
+    assert.equal(events.at(-1)?.type, "not_found");
+  });
+
+  it("ignores a second citations set", async () => {
+    // A later set cannot retroactively justify prose already shown, and must
+    // not slip past a gate the first set opened.
+    const model = async function* () {
+      yield { type: "citations", citations: [1] };
+      yield { type: "delta", text: "750 W." };
+      yield { type: "citations", citations: [99] };
+      yield { type: "usage", inputTokens: 1, outputTokens: 1 };
+    };
+    const events = await collectEvents(
+      askQuestionStream("alice", "how big is the PSU?", {
+        ...deps(sources, {
+          answer: async () => {
+            throw new Error("unused");
+          },
+        }),
+        answerStream: () => model() as AsyncGenerator<AnswerStreamEvent>,
+      }),
+    );
+
+    assert.equal(events.at(-1)?.type, "done");
+    assert.equal(events.filter((e) => e.type === "citations").length, 1);
   });
 });

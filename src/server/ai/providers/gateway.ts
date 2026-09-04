@@ -38,7 +38,12 @@ export function createGatewayProvider(): LlmProvider {
 
   // Structured outputs off, for the same reason as openrouter.ts: a proxy need
   // not implement every feature of the API it fronts.
+  // Streaming off, and for a sharper version of the same reason: this file is
+  // configured rather than exercised (README gap 2), and a proxy is even less
+  // obliged to frame server-sent events the way the vendor does than it is to
+  // implement `output_config`. Answers arrive complete; the flag is the switch.
   return createMessagesProvider("gateway", client, {
     structuredOutputs: false,
+    streaming: false,
   });
 }

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { authErrorResponse, requireUser } from "@/server/auth/guard";
 import { logger } from "@/server/log/logger";
-import { askQuestion } from "@/server/rag/answer";
+import { askQuestionStream } from "@/server/rag/answer";
 import { consumeAskQuota } from "@/server/rateLimit";
 import { checkDailySpend, type SpendScope } from "@/server/spend";
 
@@ -84,14 +84,81 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = await askQuestion(sub, parsed.data.question);
+    const encoder = new TextEncoder();
 
-    // The reservation refused what the pre-check let through: the counter
-    // filled in between, which is the race the reservation exists to lose
-    // safely.
-    if (result.status === "budget_exhausted") return limitReached(result);
+    /**
+     * NDJSON: one event per line. Not SSE, which is shaped for GET and brings
+     * reconnect semantics this endpoint must not have — a reconnect would mean
+     * a second charged model call for a question already asked.
+     *
+     * The stream opens only once every refusal that can be decided up front has
+     * been decided, so a status code still carries what a status code should.
+     */
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        /**
+         * A client that closes the tab mid-answer cancels this stream, and
+         * every enqueue after that throws. That is an ordinary disconnect, not
+         * a failure: there is nobody left to receive a terminal event and
+         * nothing worth logging at error level. So writes are attempted
+         * through one helper that notices the reader has gone, and the loop
+         * stops pulling work nobody will read.
+         */
+        let open = true;
 
-    return Response.json(result);
+        const send = (event: unknown): void => {
+          if (!open) return;
+          try {
+            controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+          } catch {
+            open = false;
+          }
+        };
+
+        try {
+          for await (const event of askQuestionStream(sub, parsed.data.question)) {
+            send(event);
+            // The reader is gone. Abandoning the generator here also runs the
+            // orchestrator's `finally`, so the call this user already reserved
+            // is still charged.
+            if (!open) break;
+          }
+        } catch (error) {
+          // The connection is already open with a 200, so this cannot become a
+          // status code. It becomes the terminal event the protocol defines
+          // for exactly this.
+          //
+          // Only the error's CLASS is logged, never the error itself: pino
+          // serializes an `err` key down to its message and stack, and a
+          // provider error can quote the request back at us — a request built
+          // from the user's own notes. src/server/ai/call.ts makes the same
+          // choice for the same reason.
+          logger.error(
+            { errorType: error instanceof Error ? error.name : "unknown", sub },
+            "ask stream failed",
+          );
+          send({ type: "error" });
+        } finally {
+          if (open) {
+            try {
+              controller.close();
+            } catch {
+              // Cancelled between the last write and here. Nothing to close.
+            }
+          }
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        // Nothing here is cacheable and a proxy buffering it would undo the
+        // whole feature.
+        "cache-control": "no-store",
+        "x-accel-buffering": "no",
+      },
+    });
   } catch (error) {
     const response = authErrorResponse(error);
     if (response) return response;

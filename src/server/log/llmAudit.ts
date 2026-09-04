@@ -8,6 +8,8 @@ export interface LlmAuditRecord {
   inputTokens: number;
   outputTokens: number;
   latencyMs: number;
+  /** Only a streaming call has one. Omitted otherwise — never zero. */
+  firstTokenMs?: number;
   outcome: "ok" | "timeout" | "error";
 }
 
