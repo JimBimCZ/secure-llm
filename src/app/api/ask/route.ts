@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { authErrorResponse, requireUser } from "@/server/auth/guard";
 import { logger } from "@/server/log/logger";
-import { askQuestion } from "@/server/rag/answer";
+import { askQuestionStream } from "@/server/rag/answer";
 import { consumeAskQuota } from "@/server/rateLimit";
 import { checkDailySpend, type SpendScope } from "@/server/spend";
 
@@ -84,14 +84,43 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = await askQuestion(sub, parsed.data.question);
+    const encoder = new TextEncoder();
 
-    // The reservation refused what the pre-check let through: the counter
-    // filled in between, which is the race the reservation exists to lose
-    // safely.
-    if (result.status === "budget_exhausted") return limitReached(result);
+    /**
+     * NDJSON: one event per line. Not SSE, which is shaped for GET and brings
+     * reconnect semantics this endpoint must not have — a reconnect would mean
+     * a second charged model call for a question already asked.
+     *
+     * The stream opens only once every refusal that can be decided up front has
+     * been decided, so a status code still carries what a status code should.
+     */
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for await (const event of askQuestionStream(sub, parsed.data.question)) {
+            controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+          }
+        } catch (error) {
+          // The connection is already open with a 200, so this cannot become a
+          // status code. It becomes the terminal event the protocol defines for
+          // exactly this, and the log line keeps the cause.
+          logger.error({ err: error, sub }, "ask stream failed");
+          controller.enqueue(encoder.encode(`${JSON.stringify({ type: "error" })}\n`));
+        } finally {
+          controller.close();
+        }
+      },
+    });
 
-    return Response.json(result);
+    return new Response(stream, {
+      headers: {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        // Nothing here is cacheable and a proxy buffering it would undo the
+        // whole feature.
+        "cache-control": "no-store",
+        "x-accel-buffering": "no",
+      },
+    });
   } catch (error) {
     const response = authErrorResponse(error);
     if (response) return response;
