@@ -590,6 +590,44 @@ review and closed, both of which would have turned a failed call into a confiden
   *"Not found in your knowledge base"* after paying for a retry — precisely the lie
   `providers/messages.ts` already refuses to tell, since the corpus was never the problem.
 
+**A contradicted answer is now taken back, not merely labelled.** Both failures above are caught
+*after* prose and sources have gone out, because a provider only learns that the reply
+contradicts them once the complete message has arrived. Until this slice that refusal arrived as
+a generic terminal `error`, and the UI — correctly, for a dropped connection — kept everything on
+screen under *"The answer was cut short before it finished."* So a sentence the model never gave
+as its answer, or a source it never actually cited, stayed readable: labelled incomplete rather
+than withdrawn. The protocol now tells the two apart:
+
+| How the call failed | Terminal event | What the reader is left with |
+| --- | --- | --- |
+| Dropped mid-stream, or stopped at `max_tokens` | `error` | What arrived, its sources, and *"cut short"* — that prose is genuine as far as it got |
+| Streamed prose or citations the finished reply does not vouch for | `retracted` | Nothing, and *"The answer was withdrawn."* |
+
+The distinction is carried by an error **type**. `UnverifiedAnswerError` is raised only by a
+provider that has already emitted prose and then finds the complete message cannot account for
+it — it does not parse, or it parses to different citations or different text. `rag/answer.ts`
+catches exactly that type and emits `retracted`; every other error propagates and keeps the
+behaviour above. It retracts only what was actually shown: the same unverified reply caught
+before any citations event fired — the scanner never anchored, so nothing went out — is an
+ordinary failed call, because "the answer was withdrawn" would explain to the reader a thing
+that never happened to them. The type is what a truncation is deliberately *not*: there the model's own
+`stop_reason` vouches for the prefix, so it stays on screen.
+
+It is deliberately **not** a `not_found`. The sources were fine and the model contradicted
+itself; *"Not found in your knowledge base"* would blame the corpus for the model's failure,
+which is the same lie `providers/messages.ts` already refuses to tell about a call that never
+usably replied. And it does **not** retry: the citation guard passed, so a stricter prompt has
+nothing to fix, and the reader is owed the correction now rather than after a second call they
+would also be charged for.
+
+**Verified against the running stack, with the contradiction forced.** No live model can be asked
+to contradict itself on demand, so the prose cross-check was inverted in a local build, one seed
+question was asked through `openrouter`/`gpt-4o-mini`, and the streamed answer, both source links
+and the privacy panel were confirmed to disappear and be replaced by the withdrawal notice. The
+patch was reverted and the shipped build re-checked answering normally. The audit row for the
+forced call reads `outcome: "error"`, `errorType: "UnverifiedAnswerError"`, `first_token_ms`
+2,121 — the class of the failure, never its message, and no content either way.
+
 **A truncated answer is refused, and still charged.** If the model stops at `max_tokens` after
 the citations closed, the answer is incomplete and the app will not present it as whole; it
 throws, and the UI keeps what arrived, its sources, and a line saying the answer was cut short.
@@ -1540,38 +1578,52 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     answer as one delta. Turning it on later is one word, and the audit column follows the
     capability: `first_token_ms` is null for a provider that does not stream.
 
-39. **A stream that dies mid-placeholder shows the placeholder syntax.** The restorer holds back
-    a trailing `[PERSON_` until it can complete it, and flushes whatever is left when the stream
-    ends. If the connection drops inside a placeholder the user sees `[PERSON_` rather than a
-    name. It is the redacted form leaking, not the personal data — the safe direction — but it
-    is visible.
+39. **~~A stream that dies mid-placeholder shows the placeholder syntax.~~ — withdrawn: it
+    cannot.** The gap reasoned from the restorer alone, where it is true that `flush()` releases
+    whatever suffix is still held. Checked against the path that would have to reach it: a
+    dropped connection throws out of the `for await` in `rag/answer.ts`, so `flush()` is never
+    called and the held `[PERSON_` is discarded with the request. `flush()` runs only when the
+    stream ended cleanly *and* the finished reply validated — and then the held text is genuine
+    prose that belongs on screen. Pinned by a test (*"shows no placeholder syntax when the stream
+    fails mid-placeholder"*) so a future `finally` around the flush cannot quietly reintroduce
+    it. What remains is narrower and is not a leak: a model whose validated answer really does
+    end in an unterminated `[` gets that character shown, because it is the model's own text.
 
-40. **The race-window `budget_exhausted` lost its `retry-after` header.** A reservation refused
-    after the stream has already opened cannot become a 429: the status was committed when the
-    first byte was sent. It arrives as a `budget_exhausted` event on a 200 instead, carrying the
-    same wording but no header for a client to act on programmatically. The pre-flight check
-    still returns a real 429 with `retry-after`, so this affects only the narrow race the
-    reservation exists to lose safely.
+40. **~~The race-window `budget_exhausted` lost its `retry-after` header.~~ — closed as far as
+    it can be, which is not all the way.** The seconds were always in the event payload; nothing
+    read them. The UI now does — *"Try again in about 7 hours"* — and a programmatic client
+    reads `retryAfterSeconds` off the event, which is the same number the header would have
+    carried: the time until the daily window rolls at UTC midnight. What genuinely cannot be
+    recovered is the header itself, because the status line went out with the first byte. A
+    client written to look only at `retry-after` still sees nothing here, and the honest
+    statement is that this refusal is actionable in the payload and invisible in the headers.
+    The pre-flight check still returns a real 429 with the header, so this remains the narrow
+    race the reservation exists to lose safely.
 
 41. **`readPartial` can be fooled by a `"citations"` key inside the answer text, if the model
     also reverses the field order — and, separately, by an `"answer"` key nested ahead of the
     real one, which needs no field reversal at all, because `valueStart` anchors on the FIRST
-    occurrence of either key it finds. The unconditional validation of the finished reply catches
-    both: it now compares what streamed against the finished reply's citations AND its prose, so
-    a mis-scanned answer throws exactly like a mis-scanned citation set does — that second half
-    is what closes the `"answer"` case, and closing it is the whole reason the comparison exists.
-    So the mis-scan is always caught, but the residual outcome is a refusal, not a clean one:
-    the throw lands mid-stream, the route turns it into a terminal `error` event, and the UI
-    deliberately KEEPS whatever citations and prose were already rendered, adding "The answer was
-    cut short before it finished." rather than erasing them. That means a wrong source, or a
-    sentence the model never actually gave as its answer, can sit on screen — labelled incomplete,
-    but visible — for however long the stream ran before the refusal caught up with it.
+    occurrence of either key it finds.** The unconditional validation of the finished reply
+    catches both: it compares what streamed against the finished reply's citations AND its prose,
+    so a mis-scanned answer throws exactly like a mis-scanned citation set does. **The residual
+    this gap used to carry — that the mis-scanned prose stayed on screen afterwards, labelled
+    "cut short" but readable — is closed.** That throw is now typed, the orchestrator emits
+    `retracted`, and the UI clears the prose, the sources and the privacy panel. What no protocol
+    can undo is that the text was on screen while the stream ran: the forced probe's audit row
+    puts the model's first token at 2,121 ms and the end of the call at 2,829 ms, so the
+    withdrawn text was readable for something under 0.7 s. Retraction
+    takes it off the screen; it cannot take it out of a reader who was quick. The mis-scan itself
+    is still a mis-scan — `partialJson.ts` is a fast path with no nesting-aware parser behind it,
+    by design — and the guarantee is that nothing it gets wrong survives to the end of the
+    response.
 
 42. **Nothing automated exercises the route, the UI, or `ai/call.ts`.** The streaming provider
     has a stub-server test (`test/openrouter-stream.test.ts`, the same shape as the gateway's),
     and the orchestrator, the partial-JSON scanner and the restorer are unit-tested. But
     `api/ask/route.ts`, `ask-form.tsx` and the audit wrapper are verified by execution probes
     and a measured pass against the running stack, recorded above, rather than by the suite.
+    That now includes the retraction: the UI clearing what it had rendered was confirmed by
+    forcing the contradiction in a local build, which is a manual pass and not a regression test.
     Same admission as gaps 23, 29 and 34, and the same residual risk: a future edit can break
     them and only another manual pass would catch it.
 
