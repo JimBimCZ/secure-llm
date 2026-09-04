@@ -46,6 +46,27 @@ export type AnswerStreamEvent =
   | { type: "delta"; text: string }
   | { type: "usage"; inputTokens: number; outputTokens: number };
 
+/**
+ * A streamed answer the finished reply cannot vouch for.
+ *
+ * Thrown only by a provider that has ALREADY emitted prose and then discovers,
+ * from the complete message, that the prose was not the model's answer — the
+ * reply does not parse, or it parses to different citations or different text
+ * than what went out. It is a failed call either way; the type exists because
+ * the two ways of failing after emitting need opposite treatment downstream.
+ *
+ * A truncation (`stop_reason: max_tokens`) and a dropped connection are NOT
+ * this: there, what streamed is genuine as far as it got, and the orchestrator
+ * keeps it on screen marked incomplete. Here nothing that went out is vouched
+ * for, so `rag/answer.ts` retracts it — CLAUDE.md §6 is a promise about what
+ * the user is left looking at, not only about what was validated.
+ */
+export class UnverifiedAnswerError extends Error {
+  // Set explicitly: the route logs `error.name` and nothing else, and a
+  // subclass inherits "Error" there unless it is named.
+  override readonly name = "UnverifiedAnswerError";
+}
+
 export interface LlmProvider {
   readonly name: string;
   /**

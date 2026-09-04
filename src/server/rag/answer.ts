@@ -1,9 +1,10 @@
 import { getLlmProvider } from "@/server/ai";
 import { answerStreamWithAudit, answerWithAudit } from "@/server/ai/call";
-import type {
-  AnswerInput,
-  AnswerResult,
-  AnswerStreamEvent,
+import {
+  UnverifiedAnswerError,
+  type AnswerInput,
+  type AnswerResult,
+  type AnswerStreamEvent,
 } from "@/server/ai/types";
 import { logger } from "@/server/log/logger";
 import { getPersonDetector } from "@/server/privacy/detectors";
@@ -37,6 +38,12 @@ export type AskResult =
   /** The honest outcome. `reason` is for the log and the UI's explanation. */
   | { status: "not_found"; reason: "no_relevant_chunks" | "citations_rejected" }
   /**
+   * An answer was streamed and then taken back, because the finished reply did
+   * not vouch for it. NOT `not_found`: the sources were fine and the model
+   * contradicted itself, and saying otherwise would blame the corpus.
+   */
+  | { status: "retracted" }
+  /**
    * A ceiling had no room for the call. Distinct from `not_found` because
    * nothing was searched and found wanting — the question was never asked.
    * `scope` decides which of the two ceilings the user is told about.
@@ -67,6 +74,17 @@ export type AskEvent =
   | { type: "delta"; text: string }
   | { type: "done" }
   | { type: "not_found"; reason: "no_relevant_chunks" | "citations_rejected" }
+  /**
+   * Take back everything this stream already showed.
+   *
+   * The one terminal event that contradicts what came before it, and the reason
+   * it exists: prose and its sources can be emitted and only afterwards found
+   * to be unvouched for, because a provider learns that from the complete
+   * message. A consumer MUST clear the citations and the answer text it has
+   * rendered. Distinct from a transport failure, where what arrived is genuine
+   * and stays on screen marked incomplete.
+   */
+  | { type: "retracted" }
   | {
       type: "budget_exhausted";
       scope: SpendScope;
@@ -258,6 +276,8 @@ export async function* askQuestionStream(
 
     // Everything the guard needs, accumulated as the stream arrives.
     let citations: Citation[] = [];
+    /** Set when the provider disowned what it had already streamed. */
+    let unverified = false;
     let returnedCitations = 0;
     let usage = { inputTokens: 0, outputTokens: 0 };
     let emittedCitations = false;
@@ -346,6 +366,23 @@ export async function* askQuestionStream(
       }
 
       yield* release(restorer.flush());
+    } catch (error) {
+      // Every other failure — a dropped connection, a timeout, a truncation —
+      // propagates, and the route turns it into the terminal `error` event that
+      // leaves the partial answer on screen marked incomplete. This one cannot
+      // be left there: the provider is telling us the prose it already emitted
+      // is not the model's answer.
+      //
+      // `emittedCitations` is half of the condition because a retraction is a
+      // statement about the screen, not about the reply. The same unverified
+      // reply caught before anything went out — the scanner never anchored, so
+      // no citations event fired — has nothing to take back, and "the answer
+      // was withdrawn" would explain to the reader a thing that never happened
+      // to them. That is an ordinary failed call and stays one.
+      if (!(error instanceof UnverifiedAnswerError) || !emittedCitations) {
+        throw error;
+      }
+      unverified = true;
     } finally {
       // The call was charged above, before it was made. Only its cost is known
       // now, and only now can it be recorded.
@@ -354,6 +391,19 @@ export async function* askQuestionStream(
       // client disconnect must not turn a call we already reserved into one we
       // never charged.
       await deps.recordTokens(ownerSub, usage.inputTokens, usage.outputTokens);
+    }
+
+    // Retraction, not a retry. The citation guard passed — these sources were
+    // real and this prose was shown — so a stricter prompt has nothing to fix,
+    // and the user is owed the correction now rather than after a second call
+    // they would also be charged for.
+    if (unverified) {
+      logger.warn(
+        { sub: ownerSub, retried: retry, outcome: "answer_retracted" },
+        "answer retracted after streaming",
+      );
+      yield { type: "retracted" };
+      return;
     }
 
     // Both halves of the guard are already spent by the time we get here:
@@ -432,6 +482,8 @@ export async function askQuestion(
         break;
       case "not_found":
         return { status: "not_found", reason: event.reason };
+      case "retracted":
+        return { status: "retracted" };
       case "budget_exhausted":
         return {
           status: "budget_exhausted",
