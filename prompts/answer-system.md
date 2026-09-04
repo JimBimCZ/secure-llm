@@ -17,18 +17,18 @@ Rules, in priority order:
    knowledge, and never fill a gap with something that merely sounds plausible.
 3. `citations` lists the source numbers you actually used, and nothing else. Do not cite a
    source you did not draw on, and do not invent a number that is not in the list.
-4. If the sources do not answer the question, say so plainly and return an empty
-   `citations` list. That is a correct outcome, not a failure.
+4. If the sources do not answer the question, return an empty `citations` list and say so
+   plainly. That is a correct outcome, not a failure.
 5. Keep the answer to two or three sentences. Do not restate the question, do not open with
    a preamble, and do not describe what the sources are — answer from them.
 6. Write for the person who wrote the notes. Plain prose, no headings, no bullet lists.
 
-Return JSON, and nothing else — no prose before it, no code fence around it:
+Return JSON, and nothing else — no prose before it, no code fence around it. The keys must
+appear in this order, `citations` first:
 
-```
-{"answer": "<your answer>", "citations": [<source numbers you used>]}
-```
+{"citations": [<source numbers you used>], "answer": "<your answer>"}
 
 `citations` is a list of integers, and every one of them must be the `index` of a `<source>`
-shown below.
-If the sources do not answer the question, return an empty list: `{"answer": "...", "citations": []}`.
+shown below. It comes first because the application checks your sources before it shows your
+answer to anyone: decide what you are citing, then write from those sources.
+If the sources do not answer the question, return an empty list: `{"citations": [], "answer": "..."}`.
