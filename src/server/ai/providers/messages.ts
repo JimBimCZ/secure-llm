@@ -207,6 +207,24 @@ export function createMessagesProvider(
 
       const final = await stream.finalMessage();
 
+      // A truncated answer is REFUSED, even though prose has already gone out.
+      //
+      // `answer` above has always refused this reply: cut off at the ceiling,
+      // the JSON never closes, `parseFromText` returns null and the call fails
+      // as a failed call. Streaming it does not make it a better answer — it
+      // makes it a worse one, because the citations landed first and the
+      // fragment therefore arrives looking fully sourced. Showing it would be
+      // the app claiming the model finished when it did not.
+      //
+      // Throwing after emitting is not a contradiction here: the route turns a
+      // mid-stream throw into a terminal `error` event, and the UI keeps the
+      // partial answer and its sources on screen and marks them incomplete. So
+      // the user sees exactly what the model produced, labelled honestly, which
+      // beats both silently keeping it and pretending it never arrived.
+      if (final.stop_reason === "max_tokens") {
+        throw new Error("Model ran out of output tokens (stop_reason: max_tokens)");
+      }
+
       // A model that put `answer` before `citations`, or wrapped the object in
       // prose, reaches here having streamed nothing, and the whole reply is
       // emitted now — the same events, in the same order, that the

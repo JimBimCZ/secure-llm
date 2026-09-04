@@ -251,7 +251,7 @@ export function AskForm() {
 
           {outcome === "error" && (
             <p className="mt-2 text-sm text-red-600">
-              The connection dropped before the answer finished.
+              The answer was cut short before it finished.
             </p>
           )}
 
