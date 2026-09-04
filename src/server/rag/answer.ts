@@ -1,5 +1,5 @@
 import { getLlmProvider } from "@/server/ai";
-import { answerWithAudit } from "@/server/ai/call";
+import { answerStreamWithAudit, answerWithAudit } from "@/server/ai/call";
 import type {
   AnswerInput,
   AnswerResult,
@@ -118,6 +118,7 @@ export interface AskDependencies {
 const LIVE: AskDependencies = {
   retrieve: retrieveChunks,
   answer: (input) => answerWithAudit(getLlmProvider(), input),
+  answerStream: (input) => answerStreamWithAudit(getLlmProvider(), input),
   reserveCall,
   recordTokens,
 };

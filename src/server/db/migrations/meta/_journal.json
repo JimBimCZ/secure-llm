@@ -57,6 +57,13 @@
       "when": 1788452632215,
       "tag": "0007_deployment_spend",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788504977336,
+      "tag": "0008_llm_calls_first_token",
+      "breakpoints": true
     }
   ]
 }
