@@ -130,6 +130,8 @@ src/
     retention/purge.ts
 prompts/                # *.md, loaded at runtime
 seed/                   # synthetic documents
+docs/architecture.md    # the engineering detail the README summarises
+docs/known-gaps.md      # all gaps in full; the README carries the index
 docs/decisions.md
 infra/keycloak/realm.json
 ```
