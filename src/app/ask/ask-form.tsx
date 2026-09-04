@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 interface Citation {
   chunkId: string;
@@ -68,12 +68,20 @@ export function AskForm() {
     null,
   );
 
+  // Mirrors `citations` state, but readable synchronously from inside the
+  // catch below. `citations` itself is a snapshot from the render `ask()`
+  // closed over — `setCitations` schedules an update but does not change what
+  // that closure sees — so the catch needs a value that is actually current
+  // at the moment the connection drops, not the one captured at submit time.
+  const citationsArrived = useRef(false);
+
   function handle(event: AskEvent) {
     switch (event.type) {
       case "privacy":
         setPrivacy(event.privacy);
         break;
       case "citations":
+        citationsArrived.current = true;
         setCitations(event.citations);
         break;
       case "delta":
@@ -108,6 +116,7 @@ export function AskForm() {
     setOutcome(null);
     setNotFoundReason(null);
     setBudgetScope(null);
+    citationsArrived.current = false;
 
     try {
       const response = await fetch("/api/ask", {
@@ -150,8 +159,31 @@ export function AskForm() {
           handle(JSON.parse(line) as AskEvent);
         }
       }
+
+      // The server terminates every line, so this should be empty. Handling
+      // it anyway costs two lines and means a future writer that forgets the
+      // final newline loses an event loudly rather than silently.
+      if (buffer.trim().length > 0) {
+        try {
+          handle(JSON.parse(buffer) as AskEvent);
+        } catch {
+          // A malformed trailing fragment must not turn an otherwise
+          // complete answer into an error — it is dropped, same as an empty
+          // line would be.
+        }
+      }
     } catch {
-      setError("Could not reach the server.");
+      // A failure AFTER the sources are on screen is a dropped connection
+      // mid-answer, not a request that never landed: the citations and the
+      // prose so far are real and stay, and the terminal `error` state is
+      // what marks them incomplete. Only a failure before that point is the
+      // generic "could not reach the server", because then there is nothing
+      // on screen to qualify.
+      if (citationsArrived.current) {
+        setOutcome("error");
+      } else {
+        setError("Could not reach the server.");
+      }
     } finally {
       setPending(false);
     }
