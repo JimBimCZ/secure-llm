@@ -274,7 +274,17 @@ export function createMessagesProvider(
       // Making that check conditional on having streamed nothing is what turned
       // a failed call into a confidently wrong one. So the streaming path now
       // ENDS where the non-streaming path ends: the reply is accepted only if
-      // the complete object still parses, and still parses to what went out.
+      // the complete object still parses, and still parses to BOTH of what
+      // went out — the citations AND the prose, checked below as two separate
+      // comparisons. A reply with a `meta.answer` field ahead of the real
+      // `answer` is why the second half exists: `readPartial` anchors on the
+      // FIRST `"answer"` key it finds in the buffer, so a nested decoy streams
+      // as if it were the answer while the citations it streams alongside are
+      // the real, validated ones. The citation cross-check alone passed that
+      // reply — same citations either way — so the user read a string the
+      // model never gave as its answer, attributed to a real source. Comparing
+      // the prose too closes that gap the same way: any disagreement is a
+      // refusal, never a display.
       const parsed =
         // Present only when the server enforced the schema for us.
         (final.parsed_output as AnswerJson | null | undefined) ??
@@ -314,6 +324,24 @@ export function createMessagesProvider(
         yield usage;
         throw new Error(
           "Model streamed a citation set its final answer does not agree with",
+        );
+      } else if (readPartial(accumulated).answerSoFar !== parsed.answer) {
+        // The citation-only twin of the check above, and the one this reply
+        // needed: `{"citations": [1], "meta": {"answer": "…"}, "answer": "…"}`
+        // streams the correct citations — there is only one `"citations"` key
+        // to anchor on — but `readAnswer` anchors `"answer"` to the FIRST
+        // occurrence in the buffer, which here is the decoy nested inside
+        // `meta`. The prose that went out is therefore not the prose the
+        // validated reply actually contains, and no amount of citations
+        // agreeing changes that. Re-reading `accumulated` here rather than
+        // trusting a value captured mid-loop matters for the ordinary case
+        // too: `accumulated` is exactly what it was when the loop's last
+        // iteration read it, so an unremarkable reply that finished streaming
+        // cleanly compares equal and is never caught by this net meant for
+        // decoys.
+        yield usage;
+        throw new Error(
+          "Model streamed prose its final answer does not agree with",
         );
       }
 

@@ -1554,10 +1554,18 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     reservation exists to lose safely.
 
 41. **`readPartial` can be fooled by a `"citations"` key inside the answer text, if the model
-    also reverses the field order.** The scanner reads left to right and the contract puts
-    citations first, so this needs two things to go wrong at once. The unconditional validation
-    of the finished reply catches the consequences — a mis-scan now throws rather than shows —
-    so the residual outcome is a refusal, never a wrong citation.
+    also reverses the field order — and, separately, by an `"answer"` key nested ahead of the
+    real one, which needs no field reversal at all, because `valueStart` anchors on the FIRST
+    occurrence of either key it finds. The unconditional validation of the finished reply catches
+    both: it now compares what streamed against the finished reply's citations AND its prose, so
+    a mis-scanned answer throws exactly like a mis-scanned citation set does — that second half
+    is what closes the `"answer"` case, and closing it is the whole reason the comparison exists.
+    So the mis-scan is always caught, but the residual outcome is a refusal, not a clean one:
+    the throw lands mid-stream, the route turns it into a terminal `error` event, and the UI
+    deliberately KEEPS whatever citations and prose were already rendered, adding "The answer was
+    cut short before it finished." rather than erasing them. That means a wrong source, or a
+    sentence the model never actually gave as its answer, can sit on screen — labelled incomplete,
+    but visible — for however long the stream ran before the refusal caught up with it.
 
 42. **Nothing automated exercises the route, the UI, or `ai/call.ts`.** The streaming provider
     has a stub-server test (`test/openrouter-stream.test.ts`, the same shape as the gateway's),

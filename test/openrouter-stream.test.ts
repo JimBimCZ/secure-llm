@@ -251,6 +251,40 @@ describe("openrouter streaming", () => {
     assert.deepEqual(emitted.at(-1), usageEvent);
   });
 
+  it("refuses a reply whose nested key must not be able to substitute the answer", async () => {
+    // `readAnswer` anchors `"answer"` to the FIRST occurrence of that key in
+    // the buffer — there is no nesting-aware parser backing it, by design, see
+    // `partialJson.ts`. A `meta.answer` field ahead of the real one is
+    // therefore a decoy: it streams as the "answer" while the citations
+    // streamed alongside it are the real, validated `[1]` — there is only one
+    // `"citations"` key in the whole reply, so that half of the cross-check
+    // passes clean. Before this fix, the citation-only comparison was the only
+    // one made, so this reply sailed through and the user would have read
+    // "FAKE TEXT NOT THE ANSWER" attributed to a real, validated source.
+    payload = sse(
+      '{"citations": [1], "meta": {"answer": "FAKE TEXT NOT THE ANSWER"}, ' +
+        '"answer": "The PSU is rated 750 W."}',
+    );
+
+    const emitted: AnswerStreamEvent[] = [];
+    await assert.rejects(
+      () => collect(emitted),
+      /streamed prose its final answer does not agree with/,
+    );
+
+    // The decoy really did go out — this is a refusal issued after the fact,
+    // not a mis-scan caught before anything was shown.
+    assert.deepEqual(emitted[0], { type: "citations", citations: [1] });
+    assert.equal(
+      emitted
+        .filter((event) => event.type === "delta")
+        .map((event) => (event as { text: string }).text)
+        .join(""),
+      "FAKE TEXT NOT THE ANSWER",
+    );
+    assert.deepEqual(emitted.at(-1), usageEvent);
+  });
+
   it("refuses a reply with citations and no answer field", async () => {
     // Valid citations, nothing to justify. zod requires `answer`, so the
     // whole-answer path throws; streaming must not turn that into an empty
