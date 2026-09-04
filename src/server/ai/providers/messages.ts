@@ -1,9 +1,15 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 
+import { readPartial } from "@/server/ai/partialJson";
 import { renderAnswerPrompt } from "@/server/ai/prompts";
 import { answerSchema, type AnswerJson } from "@/server/ai/providers/schema";
-import type { AnswerInput, AnswerResult, LlmProvider } from "@/server/ai/types";
+import type {
+  AnswerInput,
+  AnswerResult,
+  AnswerStreamEvent,
+  LlmProvider,
+} from "@/server/ai/types";
 import { env } from "@/server/env";
 
 /**
@@ -45,6 +51,19 @@ export interface MessagesProviderOptions {
    * server helps.
    */
   structuredOutputs: boolean;
+
+  /**
+   * Whether this provider exposes `answerStream`.
+   *
+   * TRUE only where streaming has been run against a live service. It is off
+   * for the vendor and the gateway stub for the reason README gaps 1 and 2
+   * give: streaming is event framing, partial JSON, usage placement and abort
+   * behaviour all at once, and a wire-format document tells you least about
+   * exactly those. Shipping it unexercised would put
+   * verification-by-construction on the seam CLAUDE.md §5 calls the most
+   * important in the project. Turning it on later is this one flag.
+   */
+  streaming: boolean;
 }
 
 export function createMessagesProvider(
@@ -52,7 +71,7 @@ export function createMessagesProvider(
   client: Anthropic,
   options: MessagesProviderOptions,
 ): LlmProvider {
-  return {
+  const provider: LlmProvider = {
     name,
     model: env.LLM_MODEL,
 
@@ -95,6 +114,137 @@ export function createMessagesProvider(
           inputTokens: response.usage.input_tokens,
           outputTokens: response.usage.output_tokens,
         },
+      };
+    },
+  };
+
+  // ABSENCE is the signal. ai/call.ts asks `provider.answerStream !== undefined`
+  // and routes the call through the whole-answer path when it is, so the flag
+  // has to decide whether the PROPERTY EXISTS — not whether the method behind it
+  // does anything. A method that was present and refused would be a defect
+  // wearing the interface's clothes.
+  if (!options.streaming) return provider;
+
+  return {
+    ...provider,
+
+    /**
+     * The same request as `answer`, read as it arrives.
+     *
+     * Two properties are load-bearing, and they pull in opposite directions.
+     * Nothing may be emitted before the citation array is complete, because the
+     * guard in rag/answer.ts rules on that array and prose sent ahead of it
+     * would be prose the guard has not seen. And field order must cost latency,
+     * never correctness: a model that ignores the prompt's ordering still has
+     * to get the right answer, just not an early one. The loop below buys the
+     * first with `readPartial`; the block after it pays for the second.
+     */
+    async *answerStream(
+      input: AnswerInput,
+      signal: AbortSignal,
+    ): AsyncGenerator<AnswerStreamEvent> {
+      const { system, user } = renderAnswerPrompt(input);
+
+      // `stream()` rather than `parse()`, and otherwise the identical request:
+      // the SDK hands back the server-sent events as they arrive and
+      // accumulates them into the message `finalMessage()` returns below.
+      //
+      // `signal` reaches the underlying request, so a call we stop waiting for
+      // is actually cancelled rather than merely abandoned — same reasoning as
+      // the note on `LlmProvider.answer`. The SDK's iterator also aborts on
+      // `return()`, so a consumer that breaks out of this generator early
+      // cancels the request too.
+      const stream = client.messages.stream(
+        {
+          model: env.LLM_MODEL,
+          max_tokens: MAX_TOKENS,
+          system,
+          messages: [{ role: "user", content: user }],
+          output_config: options.structuredOutputs
+            ? { effort: EFFORT, format: zodOutputFormat(answerSchema) }
+            : { effort: EFFORT },
+        },
+        { signal },
+      );
+
+      /** The JSON object so far — text deltas only, in arrival order. */
+      let accumulated = "";
+      let sentCitations = false;
+      /** How many characters of the answer have already gone out as deltas. */
+      let sentUpTo = 0;
+
+      for await (const event of stream) {
+        // The SDK re-emits the raw wire events, and text is the only kind that
+        // carries the answer. Thinking and signature deltas belong to the same
+        // response but not to the JSON, and letting them into the buffer would
+        // corrupt the very thing `readPartial` is scanning.
+        if (
+          event.type !== "content_block_delta" ||
+          event.delta.type !== "text_delta"
+        ) {
+          continue;
+        }
+
+        accumulated += event.delta.text;
+        const { citations, answerSoFar } = readPartial(accumulated);
+
+        // Nothing may be emitted before the citation array is whole: the guard
+        // downstream needs it, and prose sent ahead of it would be prose the
+        // guard has not seen. `readPartial` reports "not yet" rather than a
+        // guess, so this is a wait and never a gamble.
+        if (citations === null) continue;
+
+        if (!sentCitations) {
+          yield { type: "citations", citations };
+          sentCitations = true;
+        }
+
+        if (answerSoFar.length > sentUpTo) {
+          yield { type: "delta", text: answerSoFar.slice(sentUpTo) };
+          sentUpTo = answerSoFar.length;
+        }
+      }
+
+      const final = await stream.finalMessage();
+
+      // A model that put `answer` before `citations`, or wrapped the object in
+      // prose, reaches here having streamed nothing, and the whole reply is
+      // emitted now — the same events, in the same order, that the
+      // non-streaming path would have produced. That is the degradation this
+      // design accepts, and it is why field order costs latency and never
+      // correctness.
+      //
+      // It cannot double-emit. A `delta` is reachable only inside the branch
+      // that sets `sentCitations`, so `sentUpTo > 0` implies `sentCitations`,
+      // and this block runs only when `sentCitations` is false: the loop above
+      // and the recovery below are mutually exclusive by construction, not by
+      // being careful.
+      if (!sentCitations) {
+        const parsed =
+          // Present only when the server enforced the schema for us.
+          (final.parsed_output as AnswerJson | null | undefined) ??
+          parseFromText(final.content);
+
+        if (!parsed) {
+          // The same judgement `answer` makes above, for the same reason: a
+          // call that never usably replied is a FAILED CALL, not an answer
+          // with no citations.
+          throw new Error(
+            `Model returned no parseable answer (stop_reason: ${final.stop_reason})`,
+          );
+        }
+
+        yield { type: "citations", citations: parsed.citations };
+        yield { type: "delta", text: parsed.answer };
+      }
+
+      // Last, because token counts are only final when the call is: input
+      // tokens arrive with the first wire event and output tokens with the
+      // last, and the accumulated message is the one place both are settled.
+      yield {
+        type: "usage",
+        inputTokens: final.usage.input_tokens,
+        outputTokens: final.usage.output_tokens,
       };
     },
   };

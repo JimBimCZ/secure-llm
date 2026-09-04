@@ -48,7 +48,11 @@ export function createOpenRouterProvider(): LlmProvider {
   // Structured outputs off: a gateway is under no obligation to implement a
   // recent addition to the API it fronts. The prompt states the JSON contract
   // and zod verifies it, so the guarantee does not depend on the server helping.
+  // Streaming on: this is the one live service the streaming path has actually
+  // been run against, which is the whole reason the flag exists rather than
+  // being assumed from the wire format. See the option's own comment.
   return createMessagesProvider("openrouter", client, {
     structuredOutputs: false,
+    streaming: true,
   });
 }
