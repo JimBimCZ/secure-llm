@@ -499,6 +499,113 @@ need the same pass, because the suite cannot catch it.
 
 ---
 
+### Streaming: citations first, so nothing unvalidated is ever shown
+
+The answer arrives a fragment at a time now, but the promise in §6 did not move, and the way it
+did not move is the whole design.
+
+The obvious way to stream a guarded answer is the wrong one. `rag/answer.ts` can only decide
+between *answered* and *not found* once a complete `{answer, citations}` has come back — so at
+the moment the first token of prose exists, the verdict does not. Streaming the prose and
+holding the sources back keeps the letter of the promise (no citation is ever rendered
+unvalidated) while breaking its spirit: the reader watches an answer appear and then watches the
+app take it away.
+
+So **`citations` moved ahead of `answer` in the model's JSON contract.** The response is scanned
+as it arrives, the citation array is validated the moment it closes, and prose only starts after
+that. A rejected answer is now refused while the screen still says *checking sources*, and the
+user never sees a word of it. That is a stronger position than the app held before this slice,
+not merely an equal one: previously a doomed answer was generated in full, and paid for in full,
+before being discarded.
+
+**The ordering lives in the wire format, not in the UI's good intentions.** The route streams
+NDJSON, one event per line, and a `delta` never precedes its `citations`:
+
+```
+{"type":"privacy","redactedQuestion":"…","replaced":{"persons":2,"emails":0,"phones":0}}
+{"type":"citations","citations":[…]}
+{"type":"delta","text":"NVMe endurance is rated"}
+{"type":"done"}
+```
+
+A client that ignored every other rule still cannot render prose that has no validated source.
+The `citations` event is also held back until the first delta with visible content, because the
+guard has two halves — the citations resolve *and* the answer is non-empty — and the second
+cannot be known before prose exists. A model that cites correctly and then says nothing is
+refused, having shown nothing.
+
+**One generator, one guard.** `askQuestionStream` is the single implementation; the old
+`askQuestion` is now a thin collector that drains it. A streaming path beside the existing one
+would have meant two copies of the citation guard, and that is the one duplication this project
+cannot afford. A provider that cannot stream emits its whole answer as a single delta, so the
+route, the protocol and the UI each have exactly one path.
+
+**Measured against the running stack** — `openrouter`, `openai/gpt-4o-mini`, the seed corpus,
+five questions:
+
+| Question | Sources shown at | Answer complete at | Model's first token | Model's total |
+| --- | --- | --- | --- | --- |
+| NVMe drive endurance | 3,907 ms | 4,109 ms | 2,972 ms | 3,167 ms |
+| GPU power under load | 2,795 ms | 3,078 ms | 2,092 ms | 2,370 ms |
+| PCIe 5.0 drives running hot | 1,583 ms | 1,912 ms | 839 ms | 1,162 ms |
+| An unladen swallow's airspeed | — | 30 ms | no call | no call |
+| *"the contradiction I never resolved"* | — | 42 ms | no call | no call |
+
+**The honest headline is that the win is small, and the reason is the design's own choice.**
+Time to first token is **84–94%** of the model call. The model spends nearly all its time
+thinking before it emits anything, then writes a two-or-three sentence answer in **195–323 ms**.
+Since the citations have to complete before prose may start, what streaming actually buys back is
+that closing window — a fifth of a second on a call lasting one to three. Not nothing, and it is
+the difference between a dead screen and a live one, but anyone expecting the answer to unspool
+gradually will find that on this model it mostly arrives at once. A design that streamed the
+prose *first* would look far more dramatic, and would be showing text no guard had approved yet.
+That trade is the feature.
+
+**Field-order compliance was 3 of 3.** Every call put `citations` first as asked. It cannot break
+correctness either way: a model that emits `answer` first simply produces nothing early, and the
+complete reply is validated and emitted at the end — the non-streaming behaviour, reached without
+a special case. Field order costs latency, never correctness.
+
+**Citation quality did not degrade, which is what the slice was allowed to fail on.** The plan
+gave this measurement a veto: citations-first makes the model commit to its sources *before*
+composing prose, which is a real risk to the one thing this app promises, and the rule was that
+the slice would not land if quality dropped. Measured: **zero** citation-guard rejections across
+the three answered questions, and every cited file is the right one. Both unanswerable questions
+were refused before any model call at all — including *"what contradiction did I never get to
+the bottom of?"*, which gap 19 records as a known false refusal and which is still refused, by
+retrieval, exactly as before. The honest caveat on this result is that it is at ceiling: with no
+rejections and no wrong sources there is no room for a regression to hide, so no separate
+before-and-after run against `main` was performed — a comparison could only have shown the same
+perfect score twice.
+
+**What the streaming path now refuses that it used to accept.** Two failure modes were found in
+review and closed, both of which would have turned a failed call into a confident answer:
+
+- A reply that echoes an example object before the real one — the incremental scanner latched
+  onto the *example's* citations and streamed the example's text as a sourced answer, where the
+  whole-answer path had always refused the identical reply. The streaming path now validates the
+  complete final message unconditionally, exactly as the non-streaming path does, and
+  cross-checks that the citations it streamed match the ones the finished reply carries.
+- A reply carrying citations but no usable `answer` was never validated at all, and became
+  *"Not found in your knowledge base"* after paying for a retry — precisely the lie
+  `providers/messages.ts` already refuses to tell, since the corpus was never the problem.
+
+**A truncated answer is refused, and still charged.** If the model stops at `max_tokens` after
+the citations closed, the answer is incomplete and the app will not present it as whole; it
+throws, and the UI keeps what arrived, its sources, and a line saying the answer was cut short.
+The token counts are emitted before that refusal, so the call is charged for what it actually
+spent — refusing the answer and recording the cost are separate decisions, the same rule gap 14
+established for a timed-out call. For the same reason a streamed answer the citation guard
+rejects is now drained rather than abandoned: the reply is thrown away, the tokens are not.
+
+**Time to first token is recorded.** `llm_calls` gained `first_token_ms`, null for a provider
+that does not stream — such a call has no first-token moment, and a zero would claim it had one.
+It is a duration, like every other field there; still no content.
+
+**`anthropic` and `gateway` do not stream** and keep the call they have (gaps 1, 2 and 36).
+
+---
+
 ### Prompt injection: the sources are data
 
 A retrieved chunk is your own note, but a note can come from anywhere — a PDF someone
@@ -1416,15 +1523,72 @@ Written down rather than hidden. An honest gap is worth more than a half-finishe
     route in another graph embeds, this becomes gap 35 again, and the fix is the one line
     `ner.ts` now carries.
 
+37. **Streaming buys back only the model's writing time, which on this model is a fifth of a
+    second.** Measured, time to first token is 84-94% of the call: the model thinks for one to
+    three seconds and then writes a short answer in 195-323 ms. Because the citations must
+    complete before prose may start, that closing window is the entire perceived gain. It is a
+    real gain and it is the difference between a dead screen and a live one, but the feature is
+    far less dramatic than "streaming" suggests, and it would be more dramatic only by showing
+    text the guard has not approved.
+
+38. **`anthropic` and `gateway` do not stream.** Streaming lives in `providers/messages.ts`
+    behind a `streaming` flag that only `openrouter` sets. Streaming is event framing, partial
+    JSON, usage placement and abort behaviour all at once, and a wire-format document tells you
+    least about exactly those — so shipping it for two endpoints this project has never run
+    against a live service (gaps 1 and 2) would put verification-by-construction on the seam
+    §5 calls the most important in the project. A deployment on either provider gets the whole
+    answer as one delta. Turning it on later is one word, and the audit column follows the
+    capability: `first_token_ms` is null for a provider that does not stream.
+
+39. **A stream that dies mid-placeholder shows the placeholder syntax.** The restorer holds back
+    a trailing `[PERSON_` until it can complete it, and flushes whatever is left when the stream
+    ends. If the connection drops inside a placeholder the user sees `[PERSON_` rather than a
+    name. It is the redacted form leaking, not the personal data — the safe direction — but it
+    is visible.
+
+40. **The race-window `budget_exhausted` lost its `retry-after` header.** A reservation refused
+    after the stream has already opened cannot become a 429: the status was committed when the
+    first byte was sent. It arrives as a `budget_exhausted` event on a 200 instead, carrying the
+    same wording but no header for a client to act on programmatically. The pre-flight check
+    still returns a real 429 with `retry-after`, so this affects only the narrow race the
+    reservation exists to lose safely.
+
+41. **`readPartial` can be fooled by a `"citations"` key inside the answer text, if the model
+    also reverses the field order.** The scanner reads left to right and the contract puts
+    citations first, so this needs two things to go wrong at once. The unconditional validation
+    of the finished reply catches the consequences — a mis-scan now throws rather than shows —
+    so the residual outcome is a refusal, never a wrong citation.
+
+42. **Nothing automated exercises the route, the UI, or `ai/call.ts`.** The streaming provider
+    has a stub-server test (`test/openrouter-stream.test.ts`, the same shape as the gateway's),
+    and the orchestrator, the partial-JSON scanner and the restorer are unit-tested. But
+    `api/ask/route.ts`, `ask-form.tsx` and the audit wrapper are verified by execution probes
+    and a measured pass against the running stack, recorded above, rather than by the suite.
+    Same admission as gaps 23, 29 and 34, and the same residual risk: a future edit can break
+    them and only another manual pass would catch it.
+
 ## What I would build next
 
 In this order, and for these reasons:
 
 1. **Run the `anthropic` path end to end and re-measure.** Gap 1 above. Everything else is
-   downstream of knowing the real path works.
-2. **Streaming answers.** Currently the user waits for the whole response. The citation guard
-   has to run on a complete answer, so this needs care: stream the text, hold the sources
-   until the guard has passed.
+   downstream of knowing the real path works — and it is now also what gates streaming for the
+   vendor and the gateway (gap 38).
+
+**This list's second item, until this slice, was "streaming answers".** It is now built — see
+[the streaming section](#streaming-citations-first-so-nothing-unvalidated-is-ever-shown) — and
+the item's own sentence contained the wrong solution, which is worth correcting rather than
+quietly building past. It read: *"stream the text, hold the sources until the guard has
+passed."* Done that way, a rejected answer is prose the reader watches appear and then watches
+vanish; the letter of the citation promise survives and its spirit does not. What was built
+inverts it — `citations` moved ahead of `answer` in the model's contract, so the guard runs
+before a word is shown and a refusal happens while the screen still says *checking sources*.
+
+The measurement also contradicted the item's implied payoff. "Currently the user waits for the
+whole response" is true, but the wait is almost entirely the model thinking, not writing:
+streaming recovers 195-323 ms of a one-to-three-second call (gap 37). The honest summary is that
+this slice bought a modest latency win and a stronger guarantee, in that order of size and the
+reverse order of importance.
 
 **The second item on this list, until this slice, was "a stronger anonymizer, behind the same
 interface."** It is now built — see
